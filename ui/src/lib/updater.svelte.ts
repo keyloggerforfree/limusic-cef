@@ -11,7 +11,13 @@ import { canSelfUpdate, checkBetaUpdate, getSettings, openExternal, releaseNotes
 import { isNewer, isPrerelease } from './version';
 import { getVersion } from '@tauri-apps/api/app';
 
-const RELEASES_URL = 'https://github.com/SimoHypers/limusic/releases/latest';
+const RELEASES_URL = 'https://github.com/keyloggerforfree/limusic-cef/releases/latest'; // limusic-cef
+
+// limusic-cef: no self-update. The signed manifest and its key are upstream's, so installing from
+// them would swap this Chromium build for upstream's WebKitGTK one. Every check takes the
+// releases-API path in `look()` instead (the fork's releases, see `release_notes`), which can only
+// offer the download page.
+const NOTIFY_ONLY = true;
 
 /** How often the quiet check repeats while the app stays open. */
 export const QUIET_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -33,6 +39,7 @@ async function look(): Promise<boolean> {
 	const beta = (await getSettings()).update_channel === 'beta';
 	const current = await getVersion();
 	try {
+		if (NOTIFY_ONLY) throw new Error('limusic-cef: no signed updates, releases API only');
 		if (beta) {
 			// The beta pointer, through the same plugin: see `check_beta_update` in commands.rs.
 			const meta = await checkBetaUpdate();
