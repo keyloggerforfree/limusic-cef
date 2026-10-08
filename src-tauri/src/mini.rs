@@ -68,7 +68,7 @@ pub fn open(app: &AppHandle) -> Result<(), String> {
         // Linux the 180px widget came out 200 and the compact one couldn't shrink at all. Without
         // the view's own size request, the window's size is the only one left. Synchronous here:
         // this runs on the main thread, so it lands before the window is first shown.
-        #[cfg(target_os = "linux")]
+        #[cfg(webkitgtk)]
         let _ = win.with_webview(|wv| {
             use gtk::prelude::WidgetExt;
             wv.inner().set_size_request(1, 1);
