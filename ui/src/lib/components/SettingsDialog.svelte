@@ -191,7 +191,7 @@
 				version,
 				system
 			});
-			await api.openExternal(`https://github.com/SimoHypers/limusic/issues/new?${q}`);
+			await api.openExternal(`https://github.com/keyloggerforfree/limusic-cef/issues/new?${q}`); // limusic-cef
 		} catch (e) {
 			diagError = String(e);
 		}

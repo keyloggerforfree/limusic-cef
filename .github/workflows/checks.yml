@@ -32,7 +32,7 @@ jobs:
   rustfmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `components: rustfmt` rather than the default toolchain: nothing here compiles, so the rest
       # would only be download time.
@@ -57,17 +57,17 @@ jobs:
   ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # pnpm 10 because `ui/package.json` has no `packageManager` field to pin it. If one is ever
       # added, this must match it or action-setup fails on the mismatch.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
 
       # Node 22 is what the maintainers run locally, and `--experimental-strip-types` (which the
       # self-checks below rely on) needs 22.6 or later.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -104,8 +104,10 @@ jobs:
     # Pinned rather than ubuntu-latest, matching linux-release.yml, so a runner image bump cannot
     # change the system libraries under this gate without a visible diff.
     runs-on: ubuntu-24.04
+    env:
+      CEF_PATH: ${{ github.workspace }}/.cef # limusic-cef
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # dtolnay installs the minimal profile, which has no clippy. Ask for it explicitly.
       - uses: dtolnay/rust-toolchain@stable
@@ -122,8 +124,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            libgtk-4-dev cmake libnss3 libgbm1 libasound2t64 libcups2t64 libatk-bridge2.0-0t64 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 \
             libssl-dev libdbus-1-dev libmpv-dev
+        # limusic-cef: GTK 4 + cmake + libcef.so's libraries instead of WebKitGTK; see
+        # cef-linux-release.yml.
+
+      # limusic-cef: the CEF distribution cef-dll-sys builds against, cached instead of downloaded
+      # (~300 MB) on every push.
+      - name: CEF version
+        id: cef
+        run: echo "version=$(grep -A1 '^name = "cef"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.cef
+          key: cef-linux-x86_64-${{ steps.cef.outputs.version }}
 
       # Offline only. The live YouTube smoke test and the lyrics API tests are #[ignore]d and stay
       # out of CI: they would fail on YouTube's schedule, not on the change under review.
