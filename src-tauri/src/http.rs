@@ -78,7 +78,9 @@ fn webview_url(proxy: &str) -> Option<tauri::Url> {
 pub fn proxied<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
     b: tauri::WebviewWindowBuilder<'a, R, M>,
 ) -> tauri::WebviewWindowBuilder<'a, R, M> {
-    #[cfg(windows)]
+    // limusic-cef: CEF takes it per webview too, as Chromium's `proxy` preference on the shared
+    // profile, which leaves loopback direct on its own.
+    #[cfg(any(windows, all(target_os = "linux", not(webkitgtk))))]
     if let Some(url) = webview_proxy() {
         return b.proxy_url(url);
     }

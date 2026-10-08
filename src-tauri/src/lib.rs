@@ -4,6 +4,7 @@ mod appicon;
 mod audioproxy;
 mod autopause;
 mod blocked;
+mod cef;
 mod cipher;
 mod commands;
 mod db;
@@ -27,7 +28,7 @@ mod lyrics;
 mod matugen;
 mod media;
 mod mini;
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 mod nativevideo;
 #[cfg(windows)]
 #[path = "nativevideo_windows.rs"]
@@ -46,6 +47,9 @@ mod tray;
 mod videoproxy;
 mod webview;
 mod windowtitle;
+// The stand-ins for upstream's WebKitGTK code under `cfg(webkitgtk)`, under the same names.
+#[cfg(target_os = "linux")]
+use cef::{nativevideo, set_webgl, tune_webview_labelled};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -109,7 +113,7 @@ fn spawn_heap_trimmer() {
 /// player each cost their own web process, so each has to be told. The hidden cipher/PoToken
 /// webviews are deliberately left at the defaults, since the fingerprinting code they exist to run
 /// is entitled to probe whatever it likes.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 fn tune_webview(win: &tauri::WebviewWindow, media: bool) {
     use webkit2gtk::{
         CacheModel, NetworkProxyMode, NetworkProxySettings, SettingsExt, WebContextExt, WebViewExt,
@@ -176,7 +180,7 @@ fn tune_webview(win: &tauri::WebviewWindow, media: bool) {
 /// WebKit's feature list (2.42+) has no binding in webkit2gtk 2.0, so its seven functions come from
 /// the already-loaded library by name. A WebKit without one of them, or without a feature, is left
 /// alone.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)] // limusic-cef: WebKitGTK only, like its caller
 fn features_off(settings: &webkit2gtk::Settings, off: &[&[u8]]) -> bool {
     use gtk::glib::translate::ToGlibPtr;
     use std::ffi::{c_char, c_int, c_void, CStr};
@@ -243,7 +247,7 @@ fn features_off(settings: &webkit2gtk::Settings, off: &[&[u8]]) -> bool {
 /// release in between can only mean one was lost, so it is sent first. At (-1, -1), so its
 /// `mouseup`/`click` land on `<html>` rather than on whatever is now under the old spot.
 /// `ui/perf/dragpress.py` shows both the stuck press and this fix on the system WebKitGTK.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)] // limusic-cef: WebKitGTK only, like its caller
 fn heal_lost_release(webview: &webkit2gtk::WebView) {
     use gtk::gdk::{self, glib::translate::ToGlibPtrMut};
     use gtk::prelude::*;
@@ -281,7 +285,7 @@ fn heal_lost_release(webview: &webkit2gtk::WebView) {
 /// WebGL in the main window, which [`tune_webview`] turns off: the ambient light draws its glow with
 /// it (ui/src/lib/ambient.ts), so it is on exactly while that setting is. WebKit checks the setting
 /// when the page asks for a context, so a change applies without a reload.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 pub(crate) fn set_webgl(app: &tauri::AppHandle, on: bool) {
     use webkit2gtk::{SettingsExt, WebViewExt};
 
@@ -295,7 +299,7 @@ pub(crate) fn set_webgl(app: &tauri::AppHandle, on: bool) {
 }
 
 /// [`tune_webview`] for a window looked up by label. No-op if it isn't up.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 pub(crate) fn tune_webview_labelled(app: &tauri::AppHandle, label: &str, media: bool) {
     if let Some(win) = app.get_webview_window(label) {
         tune_webview(&win, media);
@@ -316,7 +320,7 @@ pub(crate) fn tune_webview_labelled(app: &tauri::AppHandle, label: &str, media: 
 /// XWayland, a backend chosen by hand, no GL on X11 either).
 ///
 /// ponytail: delete once a WebKitGTK release passes `damageprobe.py` under `GDK_GL=disable`.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)] // limusic-cef: WebKitGTK/GTK 3 only, like its caller
 fn opaque_without_gl(webview: &tauri::Webview) {
     use webkit2gtk::WebViewExt;
 
@@ -340,7 +344,7 @@ fn opaque_without_gl(webview: &tauri::Webview) {
 /// Whether GTK can make a GL context, asked the way WebKit asks before it decides to paint on the
 /// CPU (AcceleratedBackingStore.cpp, `gtkCanUseHardwareAcceleration`). Once per process, on the main
 /// thread, with GTK initialized.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)] // limusic-cef: WebKitGTK/GTK 3 only, like its caller
 fn gtk_has_gl() -> bool {
     use gtk::prelude::{WidgetExt, WidgetExtManual};
 
@@ -368,7 +372,7 @@ fn gtk_has_gl() -> bool {
 /// on Wayland and [`opaque_without_gl`] keeping the window visible.
 ///
 /// ponytail: drop it once Mesa fixes #16934 and its fix has been out a while.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)] // limusic-cef: WebKitGTK/GTK 3 only, like its caller
 fn relaunch_on_x11(env: Vec<(std::ffi::OsString, std::ffi::OsString)>) {
     use std::os::unix::process::CommandExt;
 
@@ -390,7 +394,7 @@ fn relaunch_on_x11(env: Vec<(std::ffi::OsString, std::ffi::OsString)>) {
 /// process is killed and the same URL loaded again. `reload()` would not do: the first load has
 /// usually not committed yet, and a reload of nothing paints nothing. A later crash is not ours to
 /// answer, hence the reason check.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)] // limusic-cef: WebKitGTK/GTK 3 only, like its caller
 fn restart_web_process(view: &webkit2gtk::WebView) {
     use webkit2gtk::{WebProcessTerminationReason, WebViewExt};
 
@@ -418,7 +422,7 @@ fn restart_web_process(view: &webkit2gtk::WebView) {
 /// destroys the view breaks the cycle.
 ///
 /// ponytail: delete once wry captures the view weakly.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)] // limusic-cef: WebKitGTK only, like its caller
 fn release_on_destroy(webview: &tauri::Webview) {
     use gtk::glib::{gobject_ffi, prelude::*, translate::IntoGlib};
     use gtk::prelude::WidgetExt;
@@ -620,7 +624,7 @@ fn x11_egl_vendor() -> Option<String> {
 
 /// Whether an X server answers on DISPLAY, by opening it the way GDK's X11 backend will
 /// (`XOpenDisplay`, authentication included) and closing it again.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)] // limusic-cef: WebKitGTK/GTK 3 only, like its caller
 fn x11_reachable() -> bool {
     use std::ffi::{c_char, c_void};
     type Open = unsafe extern "C" fn(*const c_char) -> *mut c_void;
@@ -708,7 +712,7 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     raise_fd_limit();
     // As launched, before the writes below, for `relaunch_on_x11`.
-    #[cfg(target_os = "linux")]
+    #[cfg(webkitgtk)] // limusic-cef: for the GTK 3 XWayland relaunch below
     let launch_env: Vec<_> = std::env::vars_os().collect();
 
     // See `AUTOSTARTED`. Up here with the other env writes, before any thread exists to read it.
@@ -848,6 +852,8 @@ pub fn run() {
         // Xwayland for everyone: a stale DISPLAY would leave the new process no display at all.
         // After every env write, because initializing GTK may start threads; tao's own
         // `gtk::init` is then a no-op.
+        // limusic-cef: GTK 3's GL; CEF runs GTK 4 and forces X11 itself.
+        #[cfg(webkitgtk)]
         if !on_x11
             && std::env::var_os("GDK_BACKEND").is_none()
             && gtk::init().is_ok()
@@ -858,7 +864,7 @@ pub fn run() {
         }
     }
 
-    let mut builder = tauri::Builder::default();
+    let mut builder = cef::builder();
 
     // Must be the first plugin registered (its documented requirement). A second launch —
     // e.g. clicking the app icon while we're hidden in the tray — re-shows this instance
@@ -882,7 +888,7 @@ pub fn run() {
 
     // Every webview, so a destroyed one gives its web process back on WebKitGTK 2.54 (#572), and
     // a transparent one stays visible without GL (#728).
-    #[cfg(target_os = "linux")]
+    #[cfg(webkitgtk)] // limusic-cef: wry/WebKitGTK only; CEF closes a browser's renderer itself
     {
         builder = builder.plugin(
             tauri::plugin::Builder::<_, ()>::new("webview-release")
@@ -943,12 +949,14 @@ pub fn run() {
             let handle = app.handle().clone();
 
             // GtkSettings belongs to the main thread, which is where setup runs (#481).
-            #[cfg(target_os = "linux")]
+            #[cfg(webkitgtk)] // limusic-cef: GTK 3; the CEF build reads GTK 4's below
             if let Some(layout) = gtk::Settings::default()
                 .and_then(|s| gtk::prelude::GtkSettingsExt::gtk_decoration_layout(&s))
             {
                 let _ = commands::BUTTON_LAYOUT.set(layout.into());
             }
+            #[cfg(all(target_os = "linux", not(webkitgtk)))]
+            cef::read_button_layout(); // limusic-cef
 
             // App data dir for the SQLite file and mpv's on-disk audio cache.
             let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
@@ -956,7 +964,7 @@ pub fn run() {
             init_logging(&data_dir);
             // Which display GDK actually opened: a Wayland connection that fails falls back to X11
             // without a word, and a report's log tail should say which one it was.
-            #[cfg(target_os = "linux")]
+            #[cfg(webkitgtk)] // limusic-cef: GTK 3's display; CEF's is always X11
             if let Some(d) = gtk::gdk::Display::default() {
                 tracing::info!(display = %gtk::glib::prelude::ObjectExt::type_(&d).name(), "gdk");
             }
