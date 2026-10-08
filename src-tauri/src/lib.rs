@@ -3,6 +3,7 @@
 mod appicon;
 mod audioproxy;
 mod blocked;
+mod cef;
 mod cipher;
 mod commands;
 mod db;
@@ -21,7 +22,7 @@ mod lyrics;
 mod matugen;
 mod media;
 mod mini;
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 mod nativevideo;
 #[cfg(windows)]
 #[path = "nativevideo_windows.rs"]
@@ -38,6 +39,9 @@ mod taskbar;
 mod tray;
 mod videoproxy;
 mod webview;
+// The stand-ins for upstream's WebKitGTK code under `cfg(webkitgtk)`, under the same names.
+#[cfg(target_os = "linux")]
+use cef::{nativevideo, set_webgl, tune_webview_labelled};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -101,7 +105,7 @@ fn spawn_heap_trimmer() {
 /// player each cost their own web process, so each has to be told. The hidden cipher/PoToken
 /// webviews are deliberately left at the defaults, since the fingerprinting code they exist to run
 /// is entitled to probe whatever it likes.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 fn tune_webview(win: &tauri::WebviewWindow, media: bool) {
     use webkit2gtk::{
         CacheModel, NetworkProxyMode, NetworkProxySettings, SettingsExt, WebContextExt, WebViewExt,
@@ -162,7 +166,7 @@ fn tune_webview(win: &tauri::WebviewWindow, media: bool) {
 /// release in between can only mean one was lost, so it is sent first. At (-1, -1), so its
 /// `mouseup`/`click` land on `<html>` rather than on whatever is now under the old spot.
 /// `ui/perf/dragpress.py` shows both the stuck press and this fix on the system WebKitGTK.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)] // limusic-cef: WebKitGTK only, like its caller
 fn heal_lost_release(webview: &webkit2gtk::WebView) {
     use gtk::gdk::{self, glib::translate::ToGlibPtrMut};
     use gtk::prelude::*;
@@ -200,7 +204,7 @@ fn heal_lost_release(webview: &webkit2gtk::WebView) {
 /// WebGL in the main window, which [`tune_webview`] turns off: the ambient light draws its glow with
 /// it (ui/src/lib/ambient.ts), so it is on exactly while that setting is. WebKit checks the setting
 /// when the page asks for a context, so a change applies without a reload.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 pub(crate) fn set_webgl(app: &tauri::AppHandle, on: bool) {
     use webkit2gtk::{SettingsExt, WebViewExt};
 
@@ -214,7 +218,7 @@ pub(crate) fn set_webgl(app: &tauri::AppHandle, on: bool) {
 }
 
 /// [`tune_webview`] for a window looked up by label. No-op if it isn't up.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 pub(crate) fn tune_webview_labelled(app: &tauri::AppHandle, label: &str, media: bool) {
     if let Some(win) = app.get_webview_window(label) {
         tune_webview(&win, media);
@@ -485,7 +489,7 @@ pub fn run() {
         }
     }
 
-    let mut builder = tauri::Builder::default();
+    let mut builder = cef::builder();
 
     // Must be the first plugin registered (its documented requirement). A second launch —
     // e.g. clicking the app icon while we're hidden in the tray — re-shows this instance
@@ -556,12 +560,14 @@ pub fn run() {
             let handle = app.handle().clone();
 
             // GtkSettings belongs to the main thread, which is where setup runs (#481).
-            #[cfg(target_os = "linux")]
+            #[cfg(webkitgtk)] // limusic-cef: GTK 3; the CEF build reads GTK 4's below
             if let Some(layout) = gtk::Settings::default()
                 .and_then(|s| gtk::prelude::GtkSettingsExt::gtk_decoration_layout(&s))
             {
                 let _ = commands::BUTTON_LAYOUT.set(layout.into());
             }
+            #[cfg(all(target_os = "linux", not(webkitgtk)))]
+            cef::read_button_layout(); // limusic-cef
 
             // App data dir for the SQLite file and mpv's on-disk audio cache.
             let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
