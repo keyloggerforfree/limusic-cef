@@ -1,0 +1,291 @@
+name: Linux release binaries (CEF)
+
+# limusic-cef's Linux release: the AppImage and the .deb, built on Chromium (CEF) through tauri's
+# feat/cef branch, attached to a fork release that ALREADY EXISTS. It replaces upstream's
+# linux-release.yml for this fork; that file is left untouched so upstream merges stay clean, and
+# must not be dispatched here (it builds the WebKitGTK app with the stock CLI).
+#
+# No self-update. Nothing is signed and no latest.json is written: the app's updater is pointed at
+# the fork and its UI only links to the releases page (src/cef.rs, ui/src/lib/updater.svelte.ts).
+#
+# Releases are tagged exactly `v<version>`, the version in tauri.conf.json: the app compares that
+# with the newest fork release's tag to decide whether to show the update banner. Create the
+# release first, on the branch to build, then dispatch this with its tag:
+#   gh release create v1.1.0 --target v1.1.0-cef -R keyloggerforfree/limusic-cef --title ... --notes ...
+#
+# Kept from upstream's workflow, and why (see linux-release.yml for the long versions):
+# - `runs-on` is pinned to ubuntu-24.04 for the glibc 2.39 floor; the floor check enforces it. It
+#   is also the oldest Ubuntu with GTK 4.14, which the CEF runtime needs.
+# - Actions are pinned to commit SHAs.
+# - Dispatch only, so the Rust cache is written on the default branch and shared.
+#
+# THIRD-PARTY TOOLS FETCHED UNPINNED: for a CEF app the bundler builds the AppImage with
+# quick-sharun, which it downloads from FabianLars/Anylinux-AppImages@main on every build, along
+# with its hooks and the sharun/uruntime binaries those fetch. tauri-bundler hardcodes the URLs,
+# so they cannot be pinned from here. Nothing in this job holds a signing key, which limits what
+# that can reach; the smoke test below is what would notice a broken bundle.
+#
+# Optional secrets: LASTFM_API_KEY / LASTFM_API_SECRET (warn-only, as upstream).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing fork release tag to build for (e.g. v1.1.0)
+        required: true
+        type: string
+      dry_run:
+        description: Build and run every check, but attach nothing to the release
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write # upload assets onto the release
+
+concurrency:
+  group: cef-linux-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04 # glibc 2.39 and GTK 4.14. NOT ubuntu-latest.
+    # Upstream's runs take 9-12 min. A cold run here adds the feat/cef CLI compile and the CEF
+    # download (~300 MB, ~1.8 GB unpacked); both are cached after that.
+    timeout-minutes: 75
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # Where cef-dll-sys and the CLI find (or download) the CEF distribution. Cached below.
+      CEF_PATH: ${{ github.workspace }}/.cef
+    steps:
+      - name: Resolve the tag
+        id: rel
+        run: |
+          TAG="${{ inputs.tag }}"
+          [ -n "$TAG" ] || { echo "::error::no tag to build for"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.rel.outputs.tag }}
+          persist-credentials: false
+
+      - name: Check the tag matches the app version
+        run: |
+          VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          if [ "v$VERSION" != "${{ steps.rel.outputs.tag }}" ]; then
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "::warning::dry run: built ref is ${{ steps.rel.outputs.tag }} but the app version is $VERSION"
+            else
+              echo "::error::tauri.conf.json says $VERSION but the tag is ${{ steps.rel.outputs.tag }}. The update banner compares the two, so they must match."
+              exit 1
+            fi
+          fi
+
+      # Same as upstream: a snapshot of the community player-cipher registry, never fatal.
+      - name: Bake in the player-cipher registry
+        shell: bash
+        run: |
+          FARADAY=https://raw.githubusercontent.com/MetrolistGroup/faraday/master/registry/player_configs.json
+          ZEMER=https://raw.githubusercontent.com/ZemerTeam/zemer-cipher/master/library/src/main/assets/player_configs.json
+          tmp="$(mktemp)"
+          for url in "$FARADAY" "$ZEMER"; do
+            if curl -fsSL --max-time 30 "$url" -o "$tmp" \
+               && jq -e '(.players | objects | length) > 0' "$tmp" >/dev/null 2>&1; then
+              cp "$tmp" src-tauri/cipher_configs.json
+              echo "bundled $(jq '.players | length' "$tmp") player configs from $url"
+              exit 0
+            fi
+            echo "::warning::player-cipher registry unusable: $url"
+          done
+          echo "::warning::no player-cipher registry reachable — shipping the empty table; clients will fetch it at runtime"
+
+      # Build: GTK 4 (the CEF runtime and its windowing), cmake (cef-dll-sys builds CEF's C++
+      # wrapper), libmpv-dev, libssl-dev, libdbus-1-dev as upstream. Run: the libraries libcef.so
+      # links, because the bundler's AppImage step and the smoke test both start the app. strace
+      # is quick-sharun's library discovery, xvfb the display, dbus the session bus the
+      # single-instance plugin cannot start without. None of upstream's WebKitGTK, GTK 3 or
+      # GStreamer packages: nothing links them any more.
+      - name: Build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev cmake libssl-dev libdbus-1-dev libmpv-dev mold patchelf file \
+            libnss3 libnspr4 libgbm1 libasound2t64 libcups2t64 libatk1.0-0t64 \
+            libatk-bridge2.0-0t64 libatspi2.0-0t64 libxkbcommon0 libxcomposite1 libxdamage1 \
+            libxrandr2 libxtst6 \
+            strace xvfb xauth dbus
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Frontend deps
+        run: cd ui && pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      # cache-bin (on by default) keeps ~/.cargo/bin, so the feat/cef CLI below is compiled once
+      # per rev rather than once per run.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: . -> target
+
+      # Keyed on the `cef` crate's version in Cargo.lock, which fixes the CEF build it downloads.
+      - name: CEF version
+        id: cef
+        run: |
+          echo "version=$(grep -A1 '^name = "cef"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CEF_PATH }}
+          key: cef-linux-x86_64-${{ steps.cef.outputs.version }}
+
+      # The stock CLI (npm's @tauri-apps/cli, or cargo-tauri from crates.io) does not know CEF and
+      # would ship a binary without libcef.so. The rev is read off root Cargo.toml's [patch], so the
+      # CLI and the tauri crates it bundles can never drift apart.
+      - name: Tauri CLI (feat/cef)
+        run: |
+          REV="$(grep -m1 -o 'tauri-apps/tauri", rev = "[0-9a-f]*"' Cargo.toml | grep -o '[0-9a-f]\{40\}')"
+          [ -n "$REV" ] || { echo "::error::no tauri rev in Cargo.toml's [patch.crates-io]"; exit 1; }
+          echo "feat/cef CLI at $REV"
+          cargo install --locked --git https://github.com/tauri-apps/tauri --rev "$REV" tauri-cli
+
+      - name: Last.fm API keys
+        env:
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+        run: |
+          if [ -n "$LASTFM_API_KEY" ] && [ -n "$LASTFM_API_SECRET" ]; then
+            printf 'LIMUSIC_LASTFM_API_KEY=%s\nLIMUSIC_LASTFM_API_SECRET=%s\n' \
+              "$LASTFM_API_KEY" "$LASTFM_API_SECRET" > src-tauri/lastfm.keys
+            echo "lastfm.keys written"
+          else
+            echo "::warning::LASTFM_API_KEY / LASTFM_API_SECRET secrets not set — this build ships without Last.fm scrobbling"
+          fi
+
+      # beforeBuildCommand emptied for the reason upstream's workflow gives: run from the repo root,
+      # pnpm could pick website/ instead of ui/.
+      #
+      # Under a session bus and a display: quick-sharun's strace mode starts the app to see what it
+      # loads, and the single-instance plugin panics without a session bus.
+      - name: Build the AppImage and the deb
+        env:
+          # The bundling tools quick-sharun fetches are AppImages themselves; the runner has no FUSE.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          # The C helpers quick-sharun compiles into the AppImage. The copy of quick-sharun tauri's
+          # bundler fetches (FabianLars' fork) still defaults to pkgforge-dev's useful-tools/lib/,
+          # which upstream moved to another repo on 2026-09-10, so those URLs 404 and the bundle
+          # fails after five download retries. The fork still has both files; pinned to a commit
+          # here so they cannot move again. Drop these once tauri-bundler's quick-sharun is updated.
+          ANYLINUX_LIB_SOURCE: https://raw.githubusercontent.com/FabianLars/Anylinux-AppImages/3e280d1b2270fecfcb2c2c823b490c782ecf1277/useful-tools/lib/anylinux.c
+          GTK_CLASS_FIX_SOURCE: https://raw.githubusercontent.com/FabianLars/Anylinux-AppImages/3e280d1b2270fecfcb2c2c823b490c782ecf1277/useful-tools/lib/gtk-class-fix.c
+        run: |
+          set -euo pipefail
+          (cd ui && pnpm build)
+          dbus-run-session -- xvfb-run -a \
+            cargo tauri build --bundles appimage,deb --config '{"build":{"beforeBuildCommand":""}}'
+          ls -la target/release/bundle/appimage target/release/bundle/deb
+
+      # Nothing bundled may need a newer glibc than this runner's (upstream's 0.2.9 failure). Over
+      # every ELF in the AppDir, wherever quick-sharun put it.
+      - name: Check the glibc floor
+        run: |
+          set -euo pipefail
+          FLOOR=2.39   # keep in sync with `runs-on` above
+          APPDIR=target/release/bundle/appimage/limusic.AppDir
+          [ -d "$APPDIR" ] || { echo "::error::no AppDir at $APPDIR — did the bundler change its layout?"; exit 1; }
+          WORST="$(find "$APPDIR" -type f -exec objdump -T {} + 2>/dev/null \
+            | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 || true)"
+          echo "highest glibc symbol required by the bundle: ${WORST:-none}"
+          if [ "$(printf '%s\nGLIBC_%s\n' "$WORST" "$FLOOR" | sort -V | tail -1)" != "GLIBC_$FLOOR" ]; then
+            echo "::error::bundle requires $WORST but the floor is GLIBC_$FLOOR — is runs-on still pinned to an old runner?"
+            exit 1
+          fi
+
+      # Start the AppImage and keep it up for 25 s. Still running when `timeout` stops it (124) is a
+      # pass; exiting early, or Chromium logging a FATAL, is not. This is what would catch a bundle
+      # missing a library quick-sharun did not see, or a broken hook from its unpinned main.
+      - name: Smoke-test the AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -uo pipefail
+          APPIMAGE="$(ls target/release/bundle/appimage/limusic_${VERSION}_*.AppImage | head -1)"
+          chmod +x "$APPIMAGE"
+          # `|| rc=$?`: Actions runs this under `bash -e`, so a bare nonzero exit, the expected 124
+          # included, would end the step right here.
+          rc=0
+          dbus-run-session -- xvfb-run -a timeout -s INT 25 "$APPIMAGE" > /tmp/smoke.log 2>&1 || rc=$?
+          tail -n 40 /tmp/smoke.log
+          if [ "$rc" != 124 ]; then
+            echo "::error::the AppImage exited on its own (code $rc) instead of staying up"; exit 1
+          fi
+          if grep -q ':FATAL:' /tmp/smoke.log; then
+            echo "::error::Chromium logged a FATAL"; exit 1
+          fi
+          echo "AppImage stayed up for 25 s"
+
+      # Tauri copies the deb's Depends from tauri.conf.json verbatim and never runs dpkg-shlibdeps,
+      # so install it on the oldest release the floor claims and resolve every library of both the
+      # binary and libcef.so against what apt pulled in. `readlink -f`: /usr/bin/limusic-app is a
+      # symlink, and the binary finds libcef.so through RUNPATH $ORIGIN, relative to the real file.
+      - name: Verify the .deb installs and resolves its libraries
+        id: deb_check
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          DEB="$(ls target/release/bundle/deb/limusic_${VERSION}_*.deb | head -1)"
+          docker run --rm -v "$PWD/$DEB:/limusic.deb:ro" ubuntu:24.04 bash -c '
+            set -eu
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y --no-install-recommends /limusic.deb
+            BIN="$(readlink -f "$(dpkg -L limusic | grep "^/usr/bin/" | head -1)")"
+            echo "installed $BIN, declared: $(dpkg-query -f "\${Depends}" -W limusic)"
+            if ldd "$BIN" "$(dirname "$BIN")/libcef.so" | grep "not found"; then
+              echo "the deb declares nothing that provides the libraries above"
+              exit 1
+            fi
+            echo "every library the binary and libcef.so need came from the declared Depends"
+          '
+
+      - name: Dry run — built and verified, attaching nothing
+        if: ${{ inputs.dry_run }}
+        run: echo "dry_run - every build step and check passed; release assets left untouched."
+
+      - name: Attach the AppImage and the deb
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.rel.outputs.tag }}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null \
+            || { echo "::error::no release for $TAG — create it first (see the header)"; exit 1; }
+
+          # `timeout`, because gh's upload has no stall detection of its own (upstream's v0.7.3).
+          upload() {
+            local i
+            for i in 1 2 3; do
+              timeout 900 gh release upload "$TAG" "$@" --clobber --repo "$GITHUB_REPOSITORY" && return 0
+              echo "::warning::upload attempt $i failed: $*"
+              sleep $((i * 10))
+            done
+            return 1
+          }
+
+          upload "$(ls target/release/bundle/appimage/limusic_${VERSION}_*.AppImage | head -1)"
+          if [ "${{ steps.deb_check.outcome }}" = success ]; then
+            upload "$(ls target/release/bundle/deb/limusic_${VERSION}_*.deb | head -1)"
+          else
+            echo "::warning::the deb failed its install check and was NOT attached — fix bundle.linux.deb.depends and re-dispatch"
+          fi

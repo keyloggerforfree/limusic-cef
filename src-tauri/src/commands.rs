@@ -2053,8 +2053,9 @@ pub async fn release_notes() -> Result<Vec<ReleaseNote>, String> {
         draft: bool,
         prerelease: bool,
     }
+    // limusic-cef: the fork's own releases, which are what its users can install.
     let releases: Vec<GhRelease> = crate::http::client()
-        .get("https://api.github.com/repos/SimoHypers/limusic/releases?per_page=20")
+        .get("https://api.github.com/repos/keyloggerforfree/limusic-cef/releases?per_page=20")
         .header("User-Agent", concat!("Limusic/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(15))
