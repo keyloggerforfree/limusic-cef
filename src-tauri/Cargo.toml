@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Limusic — desktop YouTube Music client"
-rust-version = "1.80"
+# tauri's feat/cef branch (root Cargo.toml's [patch]) is edition 2024 and needs 1.95.
+rust-version = "1.95"
 
 [lib]
 name = "app_lib"
@@ -21,12 +22,17 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-tauri = { version = "2", features = ["tray-icon", "protocol-asset", "macos-private-api", "image-png"] }
-tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
-tauri-plugin-single-instance = "2"
-tauri-plugin-autostart = "2"
-tauri-plugin-global-shortcut = "2"
+# No runtime of its own on the feat/cef branch: CEF on Linux, wry elsewhere (target sections below).
+# `tray-icon` is in the non-Linux section: Linux draws its own tray with ksni (tray.rs), and with
+# the feature on, the feat/cef CLI hunts for a GTK 3 appindicator to bundle and panics without one.
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "image-png"] }
+# The crates.io plugins ask `tauri` for its `wry` feature, which the branch no longer has (the
+# runtime is a separate crate there). plugins-workspace keeps a `feat/cef` branch without it.
+tauri-plugin-updater = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "835adce473e8f059f6ba84660dd07bcb19fb9030" }
+tauri-plugin-process = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "835adce473e8f059f6ba84660dd07bcb19fb9030" }
+tauri-plugin-single-instance = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "835adce473e8f059f6ba84660dd07bcb19fb9030" }
+tauri-plugin-autostart = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "835adce473e8f059f6ba84660dd07bcb19fb9030" }
+tauri-plugin-global-shortcut = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "835adce473e8f059f6ba84660dd07bcb19fb9030" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Phase 2 extraction stack (cipher + PoToken). context/04, 05, 13.
 # BotGuard runs under deno_core + JSDOM, NOT in a hidden webview. Every token a real browser engine
@@ -57,9 +63,11 @@ discord-rich-presence = "1.1.0"
 # saved-account key (db.rs::account_key).
 md-5 = "0.10"
 lofty = "0.22.2"
-tauri-plugin-dialog = "2.7.2"
-tauri-plugin-window-state = "2.4.1"
-tauri-plugin-clipboard-manager = "2.3.2"
+# rfd's GTK 3 backend would load GTK 3 into a process CEF already runs GTK 4 in, and the two
+# cannot coexist. The XDG desktop portal does the same dialogs over D-Bus.
+tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "835adce473e8f059f6ba84660dd07bcb19fb9030", default-features = false, features = ["xdg-portal"] }
+tauri-plugin-window-state = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "835adce473e8f059f6ba84660dd07bcb19fb9030" }
+tauri-plugin-clipboard-manager = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "835adce473e8f059f6ba84660dd07bcb19fb9030" }
 # Romanized lyrics (#202, romanize.rs). lindera's build script downloads IPADIC (~12 MB, from
 # GitHub) once and embeds it uncompressed (~45 MB in the binary, borrowed in place, never copied to
 # the heap); rust-cache keeps it across CI runs. Held at 0.30: every lindera from 0.35 on needs
@@ -89,12 +97,21 @@ windows = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-runtime-wry = { version = "2", features = ["macos-private-api"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
-# The music video's GL surface under the webview (nativevideo.rs). Same version tauri pulls in.
-gtk = "0.18"
+# Chromium Embedded Framework. Depending on it is also what makes tauri-build and the feat/cef
+# CLI fetch the CEF binary distribution and ship it in the bundle. Not on crates.io at this
+# version, so straight from the commit root Cargo.toml patches the rest of tauri to.
+tauri-runtime-cef = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
 ksni = "0.3.6"
 libc = "0.2"
-# Reaching the WebKitGTK settings wry leaves at browser defaults. Must track wry's version.
-webkit2gtk = { version = "2.0", features = ["v2_40"] }
 # Holding off suspend while playing (inhibit.rs, #347). Already in the tree through notify-rust.
 zbus = "5"
+
+# `webkitgtk` is never set. Upstream's WebKitGTK code stays in place under it, so merging upstream
+# keeps applying cleanly while none of it is compiled; see src/cef.rs.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(webkitgtk)"] }
