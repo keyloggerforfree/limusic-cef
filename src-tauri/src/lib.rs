@@ -3,6 +3,7 @@
 mod appicon;
 mod audioproxy;
 mod blocked;
+mod cef;
 mod cipher;
 mod commands;
 mod db;
@@ -19,7 +20,7 @@ mod local;
 mod lyrics;
 mod media;
 mod mini;
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 mod nativevideo;
 #[cfg(windows)]
 #[path = "nativevideo_windows.rs"]
@@ -36,6 +37,9 @@ mod taskbar;
 mod tray;
 mod videoproxy;
 mod webview;
+// The stand-ins for upstream's WebKitGTK code under `cfg(webkitgtk)`, under the same names.
+#[cfg(target_os = "linux")]
+use cef::{nativevideo, set_webgl, tune_webview_labelled};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -99,7 +103,7 @@ fn spawn_heap_trimmer() {
 /// player each cost their own web process, so each has to be told. The hidden cipher/PoToken
 /// webviews are deliberately left at the defaults, since the fingerprinting code they exist to run
 /// is entitled to probe whatever it likes.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 fn tune_webview(win: &tauri::WebviewWindow, media: bool) {
     use webkit2gtk::{CacheModel, SettingsExt, WebContextExt, WebViewExt};
 
@@ -142,7 +146,7 @@ fn tune_webview(win: &tauri::WebviewWindow, media: bool) {
 /// WebGL in the main window, which [`tune_webview`] turns off: the ambient light draws its glow with
 /// it (ui/src/lib/ambient.ts), so it is on exactly while that setting is. WebKit checks the setting
 /// when the page asks for a context, so a change applies without a reload.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 pub(crate) fn set_webgl(app: &tauri::AppHandle, on: bool) {
     use webkit2gtk::{SettingsExt, WebViewExt};
 
@@ -156,7 +160,7 @@ pub(crate) fn set_webgl(app: &tauri::AppHandle, on: bool) {
 }
 
 /// [`tune_webview`] for a window looked up by label. No-op if it isn't up.
-#[cfg(target_os = "linux")]
+#[cfg(webkitgtk)]
 pub(crate) fn tune_webview_labelled(app: &tauri::AppHandle, label: &str, media: bool) {
     if let Some(win) = app.get_webview_window(label) {
         tune_webview(&win, media);
@@ -343,7 +347,7 @@ pub fn run() {
         }
     }
 
-    let mut builder = tauri::Builder::default();
+    let mut builder = cef::builder();
 
     // Must be the first plugin registered (its documented requirement). A second launch —
     // e.g. clicking the app icon while we're hidden in the tray — re-shows this instance

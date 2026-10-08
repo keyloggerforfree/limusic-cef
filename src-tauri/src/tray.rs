@@ -234,13 +234,13 @@ mod imp {
 mod imp {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-    use tauri::{AppHandle, Manager, Wry};
+    use tauri::{AppHandle, Manager};
 
     use super::{handle_menu, show_main};
 
     /// Managed handle to the live-label item so the mpv event pump can flip "Play"/"Pause".
     struct TrayState {
-        play_pause: MenuItem<Wry>,
+        play_pause: MenuItem,
     }
 
     pub fn init(app: &AppHandle) -> tauri::Result<()> {

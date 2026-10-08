@@ -83,7 +83,7 @@ impl Bridge {
         // Reclaim the label if a prior attempt left an orphan (or a concurrent build raced us).
         destroy_and_wait(app, label).await;
 
-        let url = tauri::Url::parse(&format!("{SCHEME}://localhost/"))
+        let url = tauri::Url::parse(&crate::cef::custom_protocol_url(SCHEME)) // limusic-cef
             .map_err(|e| Error::Build(e.to_string()))?;
         // The readiness probe (see below): proves the round-trip AND that OUR document is the one
         // answering, since `about:blank` (where a fresh WebView2 sits) defines no `__harness`.

@@ -14,6 +14,7 @@ use tauri::webview::cookie::Cookie;
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
+use crate::cef::CookieThread;
 use crate::state::{AppState, SignInOutcome};
 
 const LOGIN_LABEL: &str = "login";
@@ -32,7 +33,7 @@ const REFRESH_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 /// WebKitGTK and WKWebView are WebKit engines, so a macOS Safari UA is the most
 /// internally-consistent spoof and the least likely to trip Google's "this browser may not be
 /// secure" block. **Tune here** if Google rejects it — this is the fragile part (context/15 Path A).
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 const LOGIN_UA: Option<&str> = Some(
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
      (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
@@ -43,7 +44,7 @@ const LOGIN_UA: Option<&str> = Some(
 /// Safari UA therefore contradicts the request it rides on, and Google answers the login with
 /// "This browser or app may not be secure" (#152). WebView2's own default UA is Edge's, which
 /// agrees with those hints, so there is nothing to spoof here.
-#[cfg(target_os = "windows")]
+#[cfg(not(target_os = "macos"))] // limusic-cef: Linux is CEF, Chromium too (src/cef.rs)
 const LOGIN_UA: Option<&str> = None;
 
 /// Google sign-in with `continue` back to YTM, so a successful login redirects to music.youtube.com
@@ -99,7 +100,7 @@ pub fn open_login(app: AppHandle, state: Arc<AppState>, add_account: bool) {
 
     // Window creation must happen on the main thread (GTK).
     let app2 = app.clone();
-    let dispatched = app.run_on_main_thread(move || {
+    let dispatched = app.run_on_cookie_thread(move || {
         // Reclaim the label if a prior login window is still around.
         if let Some(w) = app2.get_webview_window(LOGIN_LABEL) {
             let _ = w.destroy();
@@ -295,7 +296,7 @@ async fn read_login_cookies(app: &AppHandle, label: &'static str) -> String {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let app2 = app.clone();
     if app
-        .run_on_main_thread(move || {
+        .run_on_cookie_thread(move || {
             let _ = tx.send(youtube_cookies(&app2, label));
         })
         .is_err()
