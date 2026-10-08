@@ -24,6 +24,22 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 rand = "0.8"
 listen-protocol = { path = "crates/listen-protocol" }
 
+# Chromium (CEF) on Linux instead of WebKitGTK. The runtime lives on tauri's `feat/cef` branch,
+# which still versions itself 2.x, so every crates.io `tauri*` crate in the graph (ours and the
+# plugins') is redirected to the same commit; a second `tauri` would fail on its `links`. Pinned
+# by rev: the branch moves daily. `dpi` follows winit-gtk4, the windowing crate the CEF runtime
+# is built on, so its sizes and positions are the same type as tauri-runtime's. Not pinned: it
+# has to resolve to the same source winit-gtk4 names (`branch = "master"`); Cargo.lock pins it.
+[patch.crates-io]
+tauri = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
+tauri-build = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
+tauri-codegen = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
+tauri-macros = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
+tauri-plugin = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
+tauri-runtime = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
+tauri-runtime-wry = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
+tauri-utils = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
+dpi = { git = "https://github.com/tauri-apps/winit-gtk4", branch = "master" }
 # Release profile: thin LTO + one codegen unit for cross-crate optimization, symbols stripped
 # for size (this binary ships via AppImage self-update — size = every user's download).
 # panic stays "unwind": an abort in the mpv event thread or a tokio task would kill playback

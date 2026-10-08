@@ -117,6 +117,7 @@ fn header(app: &AppHandle, db: &Db) -> String {
             std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "?".into()),
         );
         // SAFETY: three parameterless getters returning compile-time constants from libwebkit.
+        #[cfg(webkitgtk)]
         let (major, minor, micro) = unsafe {
             (
                 webkit2gtk::ffi::webkit_get_major_version(),
@@ -124,9 +125,17 @@ fn header(app: &AppHandle, db: &Db) -> String {
                 webkit2gtk::ffi::webkit_get_micro_version(),
             )
         };
+        #[cfg(webkitgtk)]
         let _ = writeln!(
             out,
             "WebKitGTK: {major}.{minor}.{micro}, NVIDIA: {}",
+            yes_no(Path::new("/dev/nvidiactl").exists()),
+        );
+        // limusic-cef: the engine line, for CEF (src/cef.rs).
+        let _ = writeln!(
+            out,
+            "Chromium (CEF): {}, NVIDIA: {}",
+            app.webview_version().unwrap_or_else(|_| "?".into()),
             yes_no(Path::new("/dev/nvidiactl").exists()),
         );
     }
