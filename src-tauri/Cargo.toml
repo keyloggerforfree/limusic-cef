@@ -111,6 +111,9 @@ tauri-runtime-wry = { version = "2", features = ["macos-private-api"] }
 # CLI fetch the CEF binary distribution and ship it in the bundle. Not on crates.io at this
 # version, so straight from the commit root Cargo.toml patches the rest of tauri to.
 tauri-runtime-cef = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
+# Window dragging over X11 (cef.rs `cef_start_dragging`). Both already in the tree through the runtime.
+raw-window-handle = "0.6"
+x11-dl = "2.21"
 ksni = "0.3.6"
 libc = "0.2"
 # Holding off suspend while playing (inhibit.rs, #347). Already in the tree through notify-rust.
