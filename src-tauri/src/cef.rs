@@ -28,7 +28,9 @@ pub fn builder() -> tauri::Builder {
         // icon. Before the runtime, which opens the display.
         // SAFETY: a static NUL-terminated string, set before any other thread touches GLib.
         unsafe { glib_sys::g_set_prgname(c"limusic-app".as_ptr()) };
-        tauri::Builder::default().runtime(cef_runtime(multi))
+        let plugin =
+            tauri::plugin::Builder::<_, ()>::new("limusic-cef").js_init_script(DRAG_SCRIPT).build();
+        tauri::Builder::default().runtime(cef_runtime(multi)).plugin(plugin)
     }
     #[cfg(not(target_os = "linux"))]
     tauri::Builder::default().runtime(tauri_runtime_wry::Wry::default())
@@ -89,6 +91,152 @@ fn hand_off_to_running_instance() {
     );
     if sent.is_ok() {
         std::process::exit(0);
+    }
+}
+
+/// `data-tauri-drag-region` (the titlebar, the mini player) on CEF.
+///
+/// Tauri's own drag.js asks for `start_dragging`, which winit-gtk4 turns into
+/// `gdk_toplevel_begin_move` with the last button press GTK saw. On Linux the runtime runs
+/// everything on X11 (XWayland under a Wayland session) and embeds Chromium as a child X window,
+/// so the press goes to Chromium, GTK never sees one, and the call fails without a word. This
+/// script picks out the same presses drag.js does (its `isDragRegion`, copied; double clicks stay
+/// drag.js's maximize toggle) and calls [`cef_start_dragging`] instead. It listens on `window` in
+/// the capture phase, ahead of drag.js on `document`, which stops propagation once it has its
+/// press. `__TAURI_INTERNALS__.invoke` is frozen, so it cannot be rerouted in place.
+///
+/// The move starts once the pointer has travelled a few pixels with the button down, as GTK's
+/// titlebars do, not on the press. The window manager grabs the pointer for a move, so Chromium
+/// never saw the click's release and counted the next click as a first one again: double-click to
+/// maximize took three clicks.
+///
+/// Resizing has the same problem: ResizeBorders.svelte's `startResizeDragging` goes through
+/// winit-gtk4 as well. Its edge strips are the only elements with a compass `*-resize` cursor, so
+/// a press on one sends that direction along instead.
+#[cfg(target_os = "linux")]
+const DRAG_SCRIPT: &str = r#"
+(() => {
+  const ATTR = 'data-tauri-drag-region'
+  const CLICKABLE = new Set(['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'LABEL', 'SUMMARY'])
+  const ROLES = new Set(['button', 'link', 'menuitem', 'tab', 'checkbox', 'radio', 'switch', 'option'])
+  const clickable = (el) =>
+    CLICKABLE.has(el.tagName) ||
+    (el.hasAttribute('contenteditable') && el.getAttribute('contenteditable') !== 'false') ||
+    (el.hasAttribute('tabindex') && el.getAttribute('tabindex') !== '-1') ||
+    ROLES.has(el.getAttribute('role'))
+  const isDragRegion = (path) => {
+    for (const el of path) {
+      if (!(el instanceof HTMLElement)) continue
+      const attr = el.getAttribute(ATTR)
+      if (clickable(el) && attr === null) return false
+      if (attr === null) continue
+      if (attr === 'false') return false
+      if (attr === 'deep') return true
+      if (attr === '' || attr === 'true') return el === path[0]
+    }
+    return false
+  }
+  const EDGE = /^(n|s|e|w|ne|nw|se|sw)-resize$/
+  window.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !window.__TAURI_INTERNALS__) return
+    const edge = e.target instanceof Element && getComputedStyle(e.target).cursor.match(EDGE)
+    if (edge) {
+      window.__TAURI_INTERNALS__.invoke('cef_start_dragging', { edge: edge[1] }).catch(() => {})
+    } else if (e.detail === 1 && isDragRegion(e.composedPath())) {
+      const { screenX: x, screenY: y } = e
+      const stop = () => {
+        window.removeEventListener('mousemove', move, true)
+        window.removeEventListener('mouseup', stop, true)
+      }
+      const move = (m) => {
+        if (!(m.buttons & 1)) return stop()
+        if (Math.abs(m.screenX - x) + Math.abs(m.screenY - y) < 4) return
+        stop()
+        window.__TAURI_INTERNALS__.invoke('cef_start_dragging').catch(() => {})
+      }
+      window.addEventListener('mousemove', move, true)
+      window.addEventListener('mouseup', stop, true)
+    }
+  }, true)
+})()
+"#;
+
+/// Move the window with the pointer, or resize it from `edge` (`n`, `se`, ...), the way Chromium
+/// does for its own frameless windows on X11: let go of the pointer and ask the window manager
+/// with `_NET_WM_MOVERESIZE`. Called by [`DRAG_SCRIPT`]. Mutter, KWin and the other EWMH window
+/// managers, XWayland included, take it.
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub fn cef_start_dragging(window: tauri::Window, edge: Option<String>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use x11_dl::xlib;
+
+    // _NET_WM_MOVERESIZE_SIZE_TOPLEFT (0) clockwise to _SIZE_LEFT (7), then _MOVE (8).
+    let action: std::os::raw::c_long = match edge.as_deref() {
+        None => 8,
+        Some("nw") => 0,
+        Some("n") => 1,
+        Some("ne") => 2,
+        Some("e") => 3,
+        Some("se") => 4,
+        Some("s") => 5,
+        Some("sw") => 6,
+        Some("w") => 7,
+        Some(_) => return,
+    };
+    const NORMAL_APP: std::os::raw::c_long = 1; // source indication
+
+    let xid = match window.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Xlib(h)) => h.window,
+        other => {
+            tracing::warn!(handle = ?other.map(|_| ()), "window drag: no X11 window");
+            return;
+        }
+    };
+    let Ok(x) = xlib::Xlib::open() else { return };
+    // SAFETY: a private display connection, opened and closed here; every pointer handed to Xlib
+    // is a live local.
+    unsafe {
+        let display = (x.XOpenDisplay)(std::ptr::null());
+        if display.is_null() {
+            return;
+        }
+        let root = (x.XDefaultRootWindow)(display);
+        let (mut root_ret, mut child) = (0, 0);
+        let (mut rx, mut ry, mut wx, mut wy, mut mask) = (0, 0, 0, 0, 0);
+        let on_screen = (x.XQueryPointer)(
+            display,
+            root,
+            &mut root_ret,
+            &mut child,
+            &mut rx,
+            &mut ry,
+            &mut wx,
+            &mut wy,
+            &mut mask,
+        );
+        if on_screen != 0 {
+            (x.XUngrabPointer)(display, xlib::CurrentTime);
+            let mut ev: xlib::XClientMessageEvent = std::mem::zeroed();
+            ev.type_ = xlib::ClientMessage;
+            ev.window = xid as xlib::Window;
+            ev.message_type = (x.XInternAtom)(display, c"_NET_WM_MOVERESIZE".as_ptr(), xlib::False);
+            ev.format = 32;
+            let l = [rx as _, ry as _, action, xlib::Button1 as _, NORMAL_APP];
+            for (i, v) in l.into_iter().enumerate() {
+                ev.data.set_long(i, v);
+            }
+            let mut ev = xlib::XEvent::from(ev);
+            (x.XSendEvent)(
+                display,
+                root,
+                xlib::False,
+                xlib::SubstructureRedirectMask | xlib::SubstructureNotifyMask,
+                &mut ev,
+            );
+            (x.XFlush)(display);
+        }
+        (x.XCloseDisplay)(display);
     }
 }
 
