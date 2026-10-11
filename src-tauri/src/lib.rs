@@ -988,6 +988,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(only_ui(tauri::generate_handler![
+            #[cfg(target_os = "linux")]
+            cef::cef_start_dragging, // limusic-cef
             commands::search,
             commands::search_all,
             commands::search_suggestions,
