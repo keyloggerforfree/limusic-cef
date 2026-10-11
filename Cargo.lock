@@ -4139,6 +4139,7 @@ dependencies = [
  "pinyin",
  "player",
  "rand 0.8.6",
+ "raw-window-handle",
  "regex",
  "reqwest 0.12.28",
  "rusqlite",
@@ -4169,6 +4170,7 @@ dependencies = [
  "urlencoding",
  "wana_kana",
  "windows 0.61.3",
+ "x11-dl",
  "zbus 5.18.0",
  "zip",
 ]
