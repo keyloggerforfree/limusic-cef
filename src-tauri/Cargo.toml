@@ -118,7 +118,8 @@ ksni = "0.3.6"
 libc = "0.2"
 # Holding off suspend while playing (inhibit.rs, #347). Already in the tree through notify-rust.
 zbus = "5"
-# The program name GTK 4 takes WM_CLASS from (cef.rs `builder`). Already in the tree through gtk4.
+# The program name GTK 4 takes WM_CLASS from (cef.rs `builder`), and unsticking the main loop from
+# Chromium's idle GLib source (cef.rs `destroy_chromium_work_source`). Already in the tree through gtk4.
 glib-sys = "0.22"
 
 # `webkitgtk` is never set. Upstream's WebKitGTK code stays in place under it, so merging upstream

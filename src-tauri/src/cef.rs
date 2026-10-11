@@ -28,8 +28,16 @@ pub fn builder() -> tauri::Builder {
         // icon. Before the runtime, which opens the display.
         // SAFETY: a static NUL-terminated string, set before any other thread touches GLib.
         unsafe { glib_sys::g_set_prgname(c"limusic-app".as_ptr()) };
-        let plugin =
-            tauri::plugin::Builder::<_, ()>::new("limusic-cef").js_init_script(DRAG_SCRIPT).build();
+        let plugin = tauri::plugin::Builder::<_, ()>::new("limusic-cef")
+            .js_init_script(DRAG_SCRIPT)
+            // Plugin setup runs on the main thread once the runtime, and so CEF, is up.
+            .setup(|_, _| {
+                if destroy_chromium_work_source() == 0 {
+                    tracing::warn!("Chromium's GLib work source not found; the main loop may spin");
+                }
+                Ok(())
+            })
+            .build();
         tauri::Builder::default().runtime(cef_runtime(multi)).plugin(plugin)
     }
     #[cfg(not(target_os = "linux"))]
@@ -62,6 +70,74 @@ fn cef_runtime(multi: bool) -> tauri_runtime_cef::Cef {
         }
         None => cef,
     }
+}
+
+/// Destroy the GLib work source Chromium leaves on the main context, so the idle main thread
+/// sleeps instead of spinning one core at 100%. Returns how many sources it destroyed (1).
+///
+/// The runtime drives CEF with `external_message_pump`, which runs the UI thread on CEF's
+/// `MessagePumpExternal`, a `MessagePumpGlib` whose `Run` never executes. Its constructor still
+/// attaches a work source to `g_main_context_default()`, and that source's prepare returns a
+/// timeout of 0 whenever the pump is not inside `Run` (`HandlePrepare`, "`state_` may be null
+/// during tests") while its check never fires. Every blocking iteration of winit-gtk4's GLib loop
+/// therefore returned at once. CEF's scheduling reaches the runtime's own pump through
+/// `OnScheduleMessagePumpWork`, so the source has nothing to do. Reported with this fix as
+/// tauri-apps/tauri#16189; drop this once the runtime does it.
+///
+/// The source is the one whose prepare lives in libcef, at `G_PRIORITY_DEFAULT_IDLE`, polling a
+/// single FIFO (its wakeup pipe). Chromium's X11 source polls a socket instead. GLib has no way to
+/// list a context's sources, but ids are sequential, so every id below a fresh one is probed.
+/// `MessagePumpGlib`'s destructor destroys it again at exit, which GLib ignores.
+#[cfg(target_os = "linux")]
+fn destroy_chromium_work_source() -> usize {
+    use glib_sys as ffi;
+
+    fn in_libcef(addr: *const libc::c_void) -> bool {
+        let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+        // SAFETY: dladdr only reads the loader's tables; `info` is a live local.
+        if unsafe { libc::dladdr(addr, &mut info) } == 0 || info.dli_fname.is_null() {
+            return false;
+        }
+        // SAFETY: dladdr returned a NUL-terminated path owned by the loader.
+        let path = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) };
+        path.to_bytes().ends_with(b"/libcef.so")
+    }
+
+    let mut destroyed = 0;
+    // SAFETY: called on the main thread, which owns the default context; sources are only
+    // inspected through GLib's public struct layout and destroyed with GLib's own call.
+    unsafe {
+        let context = ffi::g_main_context_default();
+        let probe = ffi::g_idle_source_new();
+        let upper = ffi::g_source_attach(probe, context);
+        ffi::g_source_destroy(probe);
+        ffi::g_source_unref(probe);
+
+        for id in 1..upper {
+            let source = ffi::g_main_context_find_source_by_id(context, id);
+            if source.is_null() || (*source).source_funcs.is_null() {
+                continue;
+            }
+            let Some(prepare) = (*(*source).source_funcs).prepare else { continue };
+            if !in_libcef(prepare as *const libc::c_void)
+                || ffi::g_source_get_priority(source) != ffi::G_PRIORITY_DEFAULT_IDLE
+            {
+                continue;
+            }
+            let fds = (*source).poll_fds;
+            if fds.is_null() || !(*fds).next.is_null() {
+                continue;
+            }
+            let fd = (*((*fds).data as *const ffi::GPollFD)).fd;
+            let mut stat: libc::stat = std::mem::zeroed();
+            if libc::fstat(fd, &mut stat) != 0 || stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+                continue;
+            }
+            ffi::g_source_destroy(source);
+            destroyed += 1;
+        }
+    }
+    destroyed
 }
 
 /// Give this launch to the copy that is already running, and exit, before CEF starts.
