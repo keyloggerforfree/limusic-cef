@@ -125,6 +125,10 @@ zbus = "5"
 # The program name GTK 4 takes WM_CLASS from (cef.rs `builder`), and unsticking the main loop from
 # Chromium's idle GLib source (cef.rs `destroy_chromium_work_source`). Already in the tree through gtk4.
 glib-sys = "0.22"
+# Hearing the window manager maximize or restore a window (cef.rs `resize_on_maximized`). Both
+# already in the tree through winit-gtk4.
+gtk4 = "0.11"
+gdk4-x11 = "0.11"
 
 # `webkitgtk` is never set. Upstream's WebKitGTK code stays in place under it, so merging upstream
 # keeps applying cleanly while none of it is compiled; see src/cef.rs.
