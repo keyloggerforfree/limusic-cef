@@ -189,6 +189,12 @@ fn hand_off_to_running_instance() {
 /// Resizing has the same problem: ResizeBorders.svelte's `startResizeDragging` goes through
 /// winit-gtk4 as well. Its edge strips are the only elements with a compass `*-resize` cursor, so
 /// a press on one sends that direction along instead.
+///
+/// It also reports the window's corner radius for [`cef_round_corners`]: the largest
+/// `border-top-left-radius` among the elements that cover the whole viewport (the root layout's
+/// 12px, the mini player's card, 0 when maximized), on load, on resize, and whenever a class
+/// changes or the root's style does (themes set their variables there), at most once a frame.
+/// Not every inline style: progress bars rewrite theirs all through playback.
 #[cfg(target_os = "linux")]
 const DRAG_SCRIPT: &str = r#"
 (() => {
@@ -234,6 +240,31 @@ const DRAG_SCRIPT: &str = r#"
       window.addEventListener('mouseup', stop, true)
     }
   }, true)
+
+  let sent = null
+  let queued = false
+  const corners = () => {
+    queued = false
+    let radius = 0
+    const top = document.elementFromPoint(innerWidth / 2, 1)
+    for (let el = top; el && el !== document.documentElement; el = el.parentElement) {
+      const b = el.getBoundingClientRect()
+      if (b.left > 0 || b.top > 0 || b.width < innerWidth - 1 || b.height < innerHeight - 1) continue
+      radius = Math.max(radius, parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0)
+    }
+    const key = `${radius} ${innerWidth}x${innerHeight}`
+    if (key === sent || !window.__TAURI_INTERNALS__) return
+    sent = key
+    window.__TAURI_INTERNALS__.invoke('cef_round_corners', { radius }).catch(() => {})
+  }
+  const queue = () => {
+    if (!queued) (queued = true), requestAnimationFrame(corners)
+  }
+  addEventListener('resize', queue)
+  addEventListener('load', queue)
+  const observer = new MutationObserver(queue)
+  observer.observe(document, { subtree: true, attributes: true, attributeFilter: ['class'] })
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] })
 })()
 "#;
 
@@ -244,7 +275,6 @@ const DRAG_SCRIPT: &str = r#"
 #[cfg(target_os = "linux")]
 #[tauri::command]
 pub fn cef_start_dragging(window: tauri::Window, edge: Option<String>) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use x11_dl::xlib;
 
     // _NET_WM_MOVERESIZE_SIZE_TOPLEFT (0) clockwise to _SIZE_LEFT (7), then _MOVE (8).
@@ -262,13 +292,7 @@ pub fn cef_start_dragging(window: tauri::Window, edge: Option<String>) {
     };
     const NORMAL_APP: std::os::raw::c_long = 1; // source indication
 
-    let xid = match window.window_handle().map(|h| h.as_raw()) {
-        Ok(RawWindowHandle::Xlib(h)) => h.window,
-        other => {
-            tracing::warn!(handle = ?other.map(|_| ()), "window drag: no X11 window");
-            return;
-        }
-    };
+    let Some(xid) = x11_window(&window) else { return };
     let Ok(x) = xlib::Xlib::open() else { return };
     // SAFETY: a private display connection, opened and closed here; every pointer handed to Xlib
     // is a live local.
@@ -312,6 +336,90 @@ pub fn cef_start_dragging(window: tauri::Window, edge: Option<String>) {
             );
             (x.XFlush)(display);
         }
+        (x.XCloseDisplay)(display);
+    }
+}
+
+/// The X11 window behind a Tauri window (the GTK toplevel).
+#[cfg(target_os = "linux")]
+fn x11_window(window: &tauri::Window) -> Option<std::os::raw::c_ulong> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Xlib(h)) => Some(h.window),
+        other => {
+            tracing::warn!(handle = ?other.map(|_| ()), "no X11 window");
+            None
+        }
+    }
+}
+
+/// Clip the window to rounded corners of `radius` CSS pixels, or not at all for 0. Called by
+/// [`DRAG_SCRIPT`] with the radius the page draws.
+///
+/// The window is transparent so that the page's own rounded corners show the desktop behind them,
+/// as they do on WebKitGTK. On CEF they cannot: Chromium paints the page into an opaque child X
+/// window, and a windowed browser has no transparent background (only off-screen rendering does),
+/// so the corners came out as solid squares. Instead the toplevel gets an X shape, which the
+/// compositor clips the whole window to. A shape keeps or drops whole pixels, so the curve is not
+/// antialiased. Shaping Chromium's child instead left the toplevel's never-painted pixels behind
+/// it, black or white depending on what was there before.
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub fn cef_round_corners(window: tauri::Window, radius: f64) {
+    use x11_dl::{xfixes, xlib};
+
+    const SHAPE_BOUNDING: std::os::raw::c_int = 0;
+
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let r = (radius * scale).round().max(0.0) as i32;
+    let Some(xid) = x11_window(&window) else { return };
+    let (Ok(x), Ok(xf)) = (xlib::Xlib::open(), xfixes::Xlib::open()) else { return };
+    // SAFETY: a private display connection, opened and closed here; every pointer handed to Xlib
+    // is a live local, and the region is destroyed once the shape holds its own copy.
+    unsafe {
+        let display = (x.XOpenDisplay)(std::ptr::null());
+        if display.is_null() {
+            return;
+        }
+        let (mut root, mut wx, mut wy, mut w, mut h, mut border, mut depth) = (0, 0, 0, 0, 0, 0, 0);
+        let ok = (x.XGetGeometry)(
+            display,
+            xid,
+            &mut root,
+            &mut wx,
+            &mut wy,
+            &mut w,
+            &mut h,
+            &mut border,
+            &mut depth,
+        );
+        let (w, h) = (w as i32, h as i32);
+        if ok == 0 {
+        } else if r == 0 || 2 * r > w || 2 * r > h {
+            (xf.XFixesSetWindowShapeRegion)(display, xid, SHAPE_BOUNDING, 0, 0, 0);
+        } else {
+            // One rectangle per scanline of the top and bottom bands, inset to the circle, and one
+            // for everything between them.
+            let mut rects = Vec::with_capacity(2 * r as usize + 1);
+            for y in 0..r {
+                let dy = r as f64 - y as f64 - 0.5;
+                let inset = r - (r as f64 * r as f64 - dy * dy).max(0.0).sqrt().round() as i32;
+                let width = (w - 2 * inset) as u16;
+                rects.push(xlib::XRectangle { x: inset as i16, y: y as i16, width, height: 1 });
+                let bottom = (h - 1 - y) as i16;
+                rects.push(xlib::XRectangle { x: inset as i16, y: bottom, width, height: 1 });
+            }
+            rects.push(xlib::XRectangle {
+                x: 0,
+                y: r as i16,
+                width: w as u16,
+                height: (h - 2 * r) as u16,
+            });
+            let region = (xf.XFixesCreateRegion)(display, rects.as_mut_ptr(), rects.len() as _);
+            (xf.XFixesSetWindowShapeRegion)(display, xid, SHAPE_BOUNDING, 0, 0, region);
+            (xf.XFixesDestroyRegion)(display, region);
+        }
+        (x.XFlush)(display);
         (x.XCloseDisplay)(display);
     }
 }
