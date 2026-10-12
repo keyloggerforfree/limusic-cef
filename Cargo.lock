@@ -4224,6 +4224,7 @@ dependencies = [
  "csv",
  "discord-rich-presence",
  "futures-util",
+ "gdk4-x11",
  "gethostname",
  "glib-sys 0.22.9",
  "gtk4",
