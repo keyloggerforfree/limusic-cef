@@ -2903,6 +2903,8 @@ pub async fn listenbrainz_profile(
 #[tauri::command]
 pub fn theater_fullscreen(window: tauri::WebviewWindow, on: bool) -> Result<(), String> {
     use std::sync::atomic::{AtomicBool, Ordering};
+    #[cfg(target_os = "linux")]
+    crate::cef::theater_changed(on); // limusic-cef: F11 closes theater (cef.rs)
 
     static WAS_FULLSCREEN: AtomicBool = AtomicBool::new(false);
     if on {

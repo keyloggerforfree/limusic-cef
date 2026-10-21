@@ -1193,6 +1193,8 @@ pub fn run() {
             cef::cef_start_dragging, // limusic-cef
             #[cfg(target_os = "linux")]
             cef::cef_round_corners, // limusic-cef
+            #[cfg(target_os = "linux")]
+            cef::cef_toggle_fullscreen, // limusic-cef
             commands::search,
             commands::search_all,
             commands::search_suggestions,
