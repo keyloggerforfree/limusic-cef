@@ -39,7 +39,7 @@ pub fn builder() -> tauri::Builder {
             })
             .on_window_ready(|window| {
                 let app = tauri::Manager::app_handle(&window).clone();
-                let _ = window.run_on_main_thread(move || resize_on_maximized(app));
+                let _ = window.run_on_main_thread(move || watch_window_state(app));
             })
             .build();
         tauri::Builder::default().runtime(cef_runtime(multi)).plugin(plugin)
@@ -208,6 +208,15 @@ fn hand_off_to_running_instance() {
 /// 12px, the mini player's card, 0 when maximized), on load, on resize, and whenever a class
 /// changes or the root's style does (themes set their variables there), at most once a frame.
 /// Not every inline style: progress bars rewrite theirs all through playback.
+///
+/// And it takes F11 for [`cef_toggle_fullscreen`]. Chrome-style CEF keeps Chrome's F11, which
+/// fullscreens Chromium's own view, a child of the app's window, and gets nowhere; the runtime
+/// filters other Chrome commands that make no sense in an app window, but not that one. Chrome
+/// lets the page have the key first unless it is already fullscreen itself, which here it never is.
+/// In theater mode F11 closes it and leaves fullscreen, even one the window was in before theater
+/// opened, rather than taking theater's fullscreen away under it: the script offers theater its own
+/// Escape first (TheaterMode.svelte listens on `window` and `preventDefault`s the Escape it closes
+/// on), then asks for windowed if theater took it and toggles if nobody did.
 #[cfg(target_os = "linux")]
 const DRAG_SCRIPT: &str = r#"
 (() => {
@@ -277,9 +286,37 @@ const DRAG_SCRIPT: &str = r#"
   addEventListener('load', queue)
   const observer = new MutationObserver(queue)
   observer.observe(document, { subtree: true, attributes: true, attributeFilter: ['class'] })
-  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] })
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['style', 'data-cef-fullscreen'],
+  })
+  // Fullscreen (shape_corners sets the attribute): square the page's own window corners too, which
+  // windowCorners() (ui/src/lib/win.svelte.ts) rounds unless maximized or in theater mode.
+  const square = new CSSStyleSheet()
+  square.replaceSync('html[data-cef-fullscreen] [class~="rounded-[12px]"] { border-radius: 0 !important }')
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, square]
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'F11' || e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) return
+    e.preventDefault()
+    if (e.repeat || !window.__TAURI_INTERNALS__) return
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', cancelable: true })
+    const args = window.dispatchEvent(esc) ? {} : { on: false }
+    window.__TAURI_INTERNALS__.invoke('cef_toggle_fullscreen', args).catch(() => {})
+  }, true)
 })()
 "#;
+
+/// Fullscreen the main window, or leave fullscreen, for F11 ([`DRAG_SCRIPT`]): to `on`, or the
+/// other way from now without it. Not the mini player: a fullscreen mini player is just a large one.
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub fn cef_toggle_fullscreen(window: tauri::Window, on: Option<bool>) {
+    if window.label() == "main" {
+        let on = on.unwrap_or_else(|| !window.is_fullscreen().unwrap_or(false));
+        let _ = window.set_fullscreen(on);
+    }
+}
 
 /// Move the window with the pointer, or resize it from `edge` (`n`, `se`, ...), the way Chromium
 /// does for its own frameless windows on X11: let go of the pointer and ask the window manager
@@ -353,19 +390,42 @@ pub fn cef_start_dragging(window: tauri::Window, edge: Option<String>) {
     }
 }
 
-/// Tell a window's page it was resized whenever it is maximized or restored, on every GTK toplevel
-/// not hooked yet. The page learns the state by asking `isMaximized()` on `tauri://resize`
-/// (ui/src/lib/win.svelte.ts), and winit-gtk4 updates that state on GTK's `maximized` notify but
-/// sends no event for it. A restore from the app's own button sets the state first, but one the
-/// window manager does, dragging the window off the top of the screen, delivers the resize first,
-/// so the page asked too early, kept `maximized`, and with it square corners and no resize
-/// borders. Runs after winit-gtk4's own handler, which was connected first.
+/// Follow the window manager's maximize and fullscreen on every GTK toplevel not hooked yet, which
+/// winit-gtk4 records on GTK's notifies but sends no event for.
+///
+/// Maximized: tell the window's page it was resized. The page learns the state by asking
+/// `isMaximized()` on `tauri://resize` (ui/src/lib/win.svelte.ts). A restore from the app's own
+/// button sets the state first, but one the window manager does, dragging the window off the top
+/// of the screen, delivers the resize first, so the page asked too early, kept `maximized`, and
+/// with it square corners and no resize borders.
+///
+/// Fullscreen: reshape the corners with the page's last radius ([`shape_corners`]), since the page
+/// does not know about fullscreen and may report nothing new.
+///
+/// Both run after winit-gtk4's own handlers, which were connected first.
 #[cfg(target_os = "linux")]
-fn resize_on_maximized(app: AppHandle) {
+fn watch_window_state(app: AppHandle) {
     use gtk4::prelude::*;
     use tauri::{Emitter, Manager};
 
-    const HOOKED: &str = "limusic-cef-maximized";
+    fn xid(gtk_window: &gtk4::Window) -> Option<std::os::raw::c_ulong> {
+        let surface = gtk_window.surface()?.downcast::<gdk4_x11::X11Surface>().ok()?;
+        Some(surface.xid())
+    }
+    // Off the main thread: the runtime's window getters (the handle, the size) post to this loop
+    // and block on the answer, so calling them from a GTK handler deadlocks.
+    fn for_window(app: &AppHandle, xid: std::os::raw::c_ulong, f: fn(tauri::WebviewWindow)) {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            for window in app.webview_windows().into_values() {
+                if x11_window(&window) == Some(xid) {
+                    f(window);
+                }
+            }
+        });
+    }
+
+    const HOOKED: &str = "limusic-cef-window-state";
     for widget in gtk4::Window::list_toplevels() {
         let Ok(gtk_window) = widget.downcast::<gtk4::Window>() else { continue };
         // SAFETY: the key is ours alone and only ever holds `()`.
@@ -373,25 +433,22 @@ fn resize_on_maximized(app: AppHandle) {
             continue;
         }
         unsafe { gtk_window.set_data(HOOKED, ()) };
-        let app = app.clone();
+        let a = app.clone();
         gtk_window.connect_maximized_notify(move |gtk_window| {
-            let Some(xid) = gtk_window
-                .surface()
-                .and_then(|s| s.downcast::<gdk4_x11::X11Surface>().ok())
-                .map(|s| s.xid())
-            else {
-                return;
-            };
-            // Off the main thread: the runtime's window getters (the handle, the size) post to
-            // this loop and block on the answer, so calling them from a GTK handler deadlocks.
-            let app = app.clone();
-            std::thread::spawn(move || {
-                for window in app.webview_windows().into_values() {
-                    if x11_window(&window) == Some(xid) {
-                        let size = window.inner_size().unwrap_or_default();
-                        let target = tauri::EventTarget::Window { label: window.label().into() };
-                        let _ = window.emit_to(target, "tauri://resize", size);
-                    }
+            let Some(xid) = xid(gtk_window) else { return };
+            for_window(&a, xid, |window| {
+                let size = window.inner_size().unwrap_or_default();
+                let target = tauri::EventTarget::Window { label: window.label().into() };
+                let _ = window.emit_to(target, "tauri://resize", size);
+            });
+        });
+        let a = app.clone();
+        gtk_window.connect_fullscreened_notify(move |gtk_window| {
+            let Some(xid) = xid(gtk_window) else { return };
+            for_window(&a, xid, |window| {
+                let Some(xid) = x11_window(&window) else { return };
+                if let Some(radius) = last_radius(xid) {
+                    shape_corners(&window, xid, radius);
                 }
             });
         });
@@ -423,14 +480,46 @@ fn x11_window(window: &impl raw_window_handle::HasWindowHandle) -> Option<std::o
 /// it, black or white depending on what was there before.
 #[cfg(target_os = "linux")]
 #[tauri::command]
-pub fn cef_round_corners(window: tauri::Window, radius: f64) {
+pub fn cef_round_corners(window: tauri::WebviewWindow, radius: f64) {
+    let Some(xid) = x11_window(&window) else { return };
+    let mut radii = RADII.lock().unwrap_or_else(|e| e.into_inner());
+    radii.retain(|(x, _)| *x != xid);
+    radii.push((xid, radius));
+    drop(radii);
+    shape_corners(&window, xid, radius);
+}
+
+/// The radius each window's page last reported, by X window, for [`watch_window_state`] to
+/// reshape with when the window manager changes fullscreen under a page that says nothing new.
+/// Two or three windows at most, so a list.
+#[cfg(target_os = "linux")]
+static RADII: std::sync::Mutex<Vec<(std::os::raw::c_ulong, f64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(target_os = "linux")]
+fn last_radius(xid: std::os::raw::c_ulong) -> Option<f64> {
+    let radii = RADII.lock().unwrap_or_else(|e| e.into_inner());
+    radii.iter().find(|(x, _)| *x == xid).map(|(_, r)| *r)
+}
+
+/// [`cef_round_corners`]'s shape, square while the window is fullscreen whatever the page drew.
+/// The page squares itself only maximized and in theater mode, and F11 ([`cef_toggle_fullscreen`])
+/// or the window manager can fullscreen the window too, so it is told: `data-cef-fullscreen` on
+/// its root squares its corners as well ([`DRAG_SCRIPT`]), or Chromium's opaque surface showed
+/// white where they curved, and it reports its radius again when the attribute changes.
+#[cfg(target_os = "linux")]
+fn shape_corners(window: &tauri::WebviewWindow, xid: std::os::raw::c_ulong, radius: f64) {
     use x11_dl::{xfixes, xlib};
 
     const SHAPE_BOUNDING: std::os::raw::c_int = 0;
 
+    let fullscreen = window.is_fullscreen().unwrap_or(false);
+    let _ = window.eval(format!(
+        "document.documentElement.toggleAttribute('data-cef-fullscreen', {fullscreen})"
+    ));
+    let radius = if fullscreen { 0.0 } else { radius };
     let scale = window.scale_factor().unwrap_or(1.0);
     let r = (radius * scale).round().max(0.0) as i32;
-    let Some(xid) = x11_window(&window) else { return };
     let (Ok(x), Ok(xf)) = (xlib::Xlib::open(), xfixes::Xlib::open()) else { return };
     // SAFETY: a private display connection, opened and closed here; every pointer handed to Xlib
     // is a live local, and the region is destroyed once the shape holds its own copy.

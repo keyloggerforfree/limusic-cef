@@ -127,8 +127,8 @@ zbus = "5"
 # Chromium's idle GLib source (cef.rs `destroy_chromium_work_source`). Already in the tree through gtk4.
 glib-sys = "0.22"
 # The desktop's window-button layout (cef.rs `read_button_layout`), and hearing the window manager
-# maximize or restore a window (cef.rs `resize_on_maximized`). Both already in the tree through
-# winit-gtk4.
+# maximize, restore or fullscreen a window (cef.rs `watch_window_state`). Both already in the tree
+# through winit-gtk4.
 gtk4 = "0.11"
 gdk4-x11 = "0.11"
 
