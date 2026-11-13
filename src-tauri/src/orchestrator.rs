@@ -22,6 +22,9 @@ use tokio::sync::Mutex;
 use crate::cipher::CipherDeobfuscator;
 use crate::potoken::PoTokenGenerator;
 
+#[cfg(target_os = "linux")]
+pub mod mse; // limusic-cef
+
 /// Everything the player + UI + media layer need for one track. context/06 PlaybackData.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PlaybackData {

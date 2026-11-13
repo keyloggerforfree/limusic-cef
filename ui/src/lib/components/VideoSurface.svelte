@@ -1,6 +1,14 @@
 <script lang="ts">
 	import { forgetVideoUrl, playback, prefs, videoUrlFor } from '$lib/player.svelte';
 	import { canVideo, cinema, hasVideo, registerVideo, showVideo, video } from '$lib/video.svelte';
+	// limusic-cef: the element's source goes through mse.ts, which plays `limusic-mse:` adaptively.
+	import {
+		clearVideoSource,
+		reloadVideoSource,
+		seekLead,
+		setVideoSource,
+		videoSource
+	} from '$lib/mse';
 
 	// --- Music videos (plan 031) -------------------------------------------------------------
 	// When the track *is* a music video, the player view draws the video instead of the artwork.
@@ -203,7 +211,8 @@
 			// first costs about a second of motion, the second lands within a frame. Never while
 			// paused, since mpv is not moving and there is nothing to lead.
 			const target = mpvNow();
-			el.currentTime = target + (playback.paused || bufferedAt(el, target) ? 0 : SEEK_COST);
+			el.currentTime =
+				target + (playback.paused || bufferedAt(el, target) ? 0 : seekLead(el, SEEK_COST)); // limusic-cef
 			return;
 		}
 		if (Math.abs(drift) > SEEK_FROM) {
@@ -215,7 +224,7 @@
 			el.playbackRate = playback.speed;
 			// Aim past the re-buffer this is about to cost, or it lands behind by exactly that.
 			// Not while paused: mpv is not moving, so the lead would only overshoot.
-			el.currentTime = mpvNow() + (playback.paused ? 0 : SEEK_COST);
+			el.currentTime = mpvNow() + (playback.paused ? 0 : seekLead(el, SEEK_COST)); // limusic-cef
 			return;
 		}
 		if (playback.paused) return; // nothing is moving, so there is nothing to trim
@@ -346,19 +355,19 @@
 		const cors = prefs.ambient ? 'anonymous' : null;
 		if (el.crossOrigin !== cors) {
 			el.crossOrigin = cors;
-			if (cors && u && el.getAttribute('src') === u) {
+			if (cors && u && videoSource(el) === u) {
 				synced = false;
 				syncSeeks = 0;
 				syncStart = 0;
 				lastSeek = 0;
-				el.load();
+				reloadVideoSource(el); // limusic-cef
 				return;
 			}
 		}
 		// Setting src to the same string would still reload the element, so only write a change.
-		if (u && el.getAttribute('src') !== u) el.setAttribute('src', u);
-		else if (!u && el.hasAttribute('src')) {
-			el.removeAttribute('src');
+		if (u && videoSource(el) !== u) setVideoSource(el, u); // limusic-cef
+		else if (!u && videoSource(el)) {
+			clearVideoSource(el); // limusic-cef: removeAttribute('src')
 			// Removing the attribute does not run the media load algorithm (HTML 4.8.11 says so
 			// outright), so without this the element keeps the finished video's GStreamer pipeline,
 			// its buffers and its connection to the proxy for the rest of the session. `load()` is

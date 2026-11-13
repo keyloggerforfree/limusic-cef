@@ -142,7 +142,11 @@ async fn handle(
     let (_, token) = ENDPOINT.get().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let video_id = video_id_from(req.uri().path(), token).ok_or(StatusCode::NOT_FOUND)?;
     // Nothing resolved this id: a stale element, or a `video_stream` that returned None.
-    let upstream = state.video_url(video_id).ok_or(StatusCode::NOT_FOUND)?;
+    let upstream = state.video_url(video_id);
+    // limusic-cef: the MSE player's qualities, `<videoId>.<itag>`, live in cef.rs.
+    #[cfg(target_os = "linux")]
+    let upstream = upstream.or_else(|| crate::cef::rendition_url(video_id));
+    let upstream = upstream.ok_or(StatusCode::NOT_FOUND)?;
 
     // The element's Range goes upstream untouched and googlevideo does the arithmetic, so there is
     // no range maths here to get wrong. Everything else the webview sent is dropped.
