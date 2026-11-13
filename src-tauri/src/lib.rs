@@ -1195,6 +1195,8 @@ pub fn run() {
             cef::cef_round_corners, // limusic-cef
             #[cfg(target_os = "linux")]
             cef::cef_toggle_fullscreen, // limusic-cef
+            #[cfg(target_os = "linux")]
+            cef::cef_video_manifest, // limusic-cef
             commands::search,
             commands::search_all,
             commands::search_suggestions,

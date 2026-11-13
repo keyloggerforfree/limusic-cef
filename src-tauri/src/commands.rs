@@ -313,14 +313,21 @@ const UI_SETTINGS: [&str; 33] = [
 /// ordinary answer for a song and leaves the artwork in place. The real googlevideo URL never
 /// leaves Rust (context/11).
 #[tauri::command]
+#[cfg_attr(target_os = "linux", allow(unreachable_code, unused_variables))] // limusic-cef
 pub async fn video_stream(
     state: St<'_>,
+    window: tauri::WebviewWindow, // limusic-cef
     video_id: String,
     max_height: i32,
 ) -> Result<Option<String>, String> {
     if crate::local::is_local_song(&video_id) {
         return Ok(None);
     }
+    // limusic-cef: every quality for the MSE player (ui/src/lib/mse.ts), not one URL (cef.rs).
+    #[cfg(target_os = "linux")]
+    return Ok(crate::cef::video_stream(state.inner(), &window, &video_id).await);
+    #[cfg(not(target_os = "linux"))]
+    let _ = window;
     // Already resolved and still live: the loopback URL is a pure function of the videoId, so
     // there is nothing left to do. Re-resolving costs up to two `/player` round trips, and the
     // player view pays them on every reopen otherwise.
@@ -389,6 +396,8 @@ pub async fn native_video_rect(
 /// to VISIONOS first, so a WEB_REMIX URL that failed is not rebuilt from the same reply.
 #[tauri::command]
 pub async fn forget_video_stream(state: St<'_>, video_id: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    crate::cef::forget_video(&video_id); // limusic-cef
     state.forget_video_url(&video_id);
     state.orchestrator.mark_video_failed(&video_id);
     Ok(())

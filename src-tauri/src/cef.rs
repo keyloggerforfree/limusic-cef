@@ -87,6 +87,162 @@ where
     });
 }
 
+/// The tallest 16:9 picture the window's monitor shows whole, the top of the music video's
+/// quality ladder: `min(height, width * 9 / 16)` in physical pixels, so 1080 on a 1920x1200 screen
+/// and 1440 on 2560x1440, measured the way the ladder measures formats
+/// (`orchestrator::mse::class`). Upstream stops at 720p, sized to the player view, because on
+/// Linux mpv draws its picture; on CEF the `<video>` element is the only one, cinema mode included.
+#[cfg(target_os = "linux")]
+fn video_height(window: &tauri::WebviewWindow) -> i32 {
+    let Some(size) = window.current_monitor().ok().flatten().map(|m| *m.size()) else {
+        return 1080;
+    };
+    let (w, h) = (size.width as i32, size.height as i32);
+    h.min(w * 9 / 16).clamp(360, 2160)
+}
+
+/// What the MSE player (ui/src/lib/mse.ts) needs about one video: its length and every quality.
+#[cfg(target_os = "linux")]
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoManifest {
+    duration: f64,
+    renditions: Vec<VideoRendition>,
+}
+
+/// One quality: where the proxy serves it, its picture, and where in the file its header and
+/// segment index are. Ranges are inclusive, as `/player` gives them.
+#[cfg(target_os = "linux")]
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoRendition {
+    url: String,
+    itag: i32,
+    width: i32,
+    height: i32,
+    fps: i32,
+    bitrate: i64,
+    mime: String,
+    length: u64,
+    init: (u64, u64),
+    index: (u64, u64),
+}
+
+/// The resolved ladders, by videoId, with their googlevideo URLs by itag and when those go stale.
+/// Not upstream's `AppState` URL cache: that one holds 8 URLs and drops them all when full, and a
+/// ladder is several, so the next track's prefetch would have emptied the playing one. Oldest out.
+#[cfg(target_os = "linux")]
+static VIDEOS: std::sync::Mutex<Vec<KeptVideo>> = std::sync::Mutex::new(Vec::new());
+
+/// A kept ladder: videoId, when it goes stale, what the page gets, and the URL behind each itag.
+#[cfg(target_os = "linux")]
+type KeptVideo = (String, i64, VideoManifest, Vec<(i32, String)>);
+
+/// How many videos' ladders are kept, and for how long (googlevideo URLs live about six hours;
+/// upstream's cache keeps its own for four).
+#[cfg(target_os = "linux")]
+const VIDEOS_KEPT: usize = 4;
+#[cfg(target_os = "linux")]
+const VIDEO_TTL_SECS: i64 = 4 * 60 * 60;
+
+#[cfg(target_os = "linux")]
+fn videos() -> std::sync::MutexGuard<'static, Vec<KeptVideo>> {
+    VIDEOS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `video_stream` on CEF (commands.rs): resolve `video_id`'s ladder, up to what the window's
+/// screen can show, and hand the page `limusic-mse:<videoId>` for the MSE player instead of a URL.
+/// `None` when there is no video, as upstream answers, so the view keeps the artwork.
+#[cfg(target_os = "linux")]
+pub async fn video_stream(
+    state: &crate::state::AppState,
+    window: &tauri::WebviewWindow,
+    video_id: &str,
+) -> Option<String> {
+    let now = crate::db::now_secs();
+    if videos().iter().any(|(id, until, _, _)| id == video_id && *until > now) {
+        return Some(format!("limusic-mse:{video_id}"));
+    }
+    let disabled = state.disabled_clients();
+    let ladder =
+        state.orchestrator.resolve_video_ladder(video_id, video_height(window), &disabled).await;
+    let mut renditions = Vec::new();
+    let mut urls = Vec::new();
+    let mut duration = 0.0_f64;
+    for r in ladder {
+        let f = &r.format;
+        let (Some(init), Some(index)) = (
+            f.init_range.as_ref().and_then(|r| r.bounds()),
+            f.index_range.as_ref().and_then(|r| r.bounds()),
+        ) else {
+            continue;
+        };
+        let Some(length) = f.content_length.as_deref().and_then(|n| n.parse().ok()) else {
+            continue;
+        };
+        let Some(url) = crate::videoproxy::url_for(&format!("{video_id}.{}", f.itag)) else {
+            continue;
+        };
+        if let Some(ms) = f.approx_duration_ms.as_deref().and_then(|n| n.parse::<f64>().ok()) {
+            duration = duration.max(ms / 1000.0);
+        }
+        renditions.push(VideoRendition {
+            url,
+            itag: f.itag,
+            width: f.width.unwrap_or(0),
+            height: f.height.unwrap_or(0),
+            fps: f.fps.unwrap_or(30),
+            bitrate: f.bitrate,
+            mime: f.mime_type.clone(),
+            length,
+            init,
+            index,
+        });
+        urls.push((f.itag, r.url));
+    }
+    if renditions.is_empty() {
+        return None;
+    }
+    let manifest = VideoManifest { duration, renditions };
+    let mut kept = videos();
+    kept.retain(|(id, _, _, _)| id != video_id);
+    if kept.len() >= VIDEOS_KEPT {
+        kept.remove(0);
+    }
+    kept.push((video_id.to_owned(), now + VIDEO_TTL_SECS, manifest, urls));
+    Some(format!("limusic-mse:{video_id}"))
+}
+
+/// The MSE player's manifest for a video `video_stream` resolved, or `None` once it went stale or
+/// was forgotten: the page then reports the element failed, and the view resolves again.
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub fn cef_video_manifest(video_id: String) -> Option<VideoManifest> {
+    let now = crate::db::now_secs();
+    let kept = videos();
+    kept.iter()
+        .find(|(id, until, _, _)| *id == video_id && *until > now)
+        .map(|(_, _, manifest, _)| manifest.clone())
+}
+
+/// Drop a video's ladder, for upstream's `forget_video_stream`: the element could not play it.
+#[cfg(target_os = "linux")]
+pub fn forget_video(video_id: &str) {
+    videos().retain(|(id, _, _, _)| id != video_id);
+}
+
+/// The googlevideo URL behind one quality, for the loopback proxy (videoproxy.rs), which serves
+/// them at `<videoId>.<itag>`. A dot is never in a videoId.
+#[cfg(target_os = "linux")]
+pub fn rendition_url(key: &str) -> Option<String> {
+    let (video_id, itag) = key.rsplit_once('.')?;
+    let itag: i32 = itag.parse().ok()?;
+    let now = crate::db::now_secs();
+    let kept = videos();
+    let (_, _, _, urls) = kept.iter().find(|(id, until, _, _)| id == video_id && *until > now)?;
+    urls.iter().find(|(i, _)| *i == itag).map(|(_, url)| url.clone())
+}
+
 /// The CEF runtime as the Linux build configures it.
 ///
 /// Session cookies persist: the login webview (session.rs) keeps its own Google session so a

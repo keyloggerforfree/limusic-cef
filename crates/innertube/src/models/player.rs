@@ -195,6 +195,27 @@ pub struct Format {
     pub cipher: Option<String>,
     #[serde(default)]
     pub audio_track: Option<AudioTrack>,
+    /// limusic-cef: where an adaptive format's container header and segment index sit, which the
+    /// CEF build's MSE player needs to fetch it in segments (src-tauri/src/orchestrator/mse.rs).
+    #[serde(default)]
+    pub init_range: Option<ByteRange>,
+    #[serde(default)]
+    pub index_range: Option<ByteRange>,
+}
+
+/// limusic-cef: an inclusive byte range, as `/player` writes it: `{"start": "0", "end": "219"}`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ByteRange {
+    pub start: String,
+    pub end: String,
+}
+
+impl ByteRange {
+    /// Both ends as numbers, or `None` for a range that does not parse or runs backwards.
+    pub fn bounds(&self) -> Option<(u64, u64)> {
+        let (s, e) = (self.start.parse().ok()?, self.end.parse().ok()?);
+        (s <= e).then_some((s, e))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
