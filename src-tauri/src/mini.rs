@@ -106,10 +106,16 @@ pub fn set_compact(app: &AppHandle, compact: bool) -> Result<(), String> {
         (Ok(pos), Ok(old), Ok(Some(m))) => Some(anchored(pos, old, new, *m.position(), *m.size())),
         _ => None,
     };
-    win.set_size(new).map_err(|e| e.to_string())?;
-    // A no-op on Wayland, where the compositor keeps the top-left corner where it was.
-    if let Some(p) = to {
-        let _ = win.set_position(p);
+    // limusic-cef: through GTK's size hints, and the move after GTK's own resize (cef.rs).
+    #[cfg(target_os = "linux")]
+    crate::cef::set_fixed_size(&win, w, h, to)?;
+    #[cfg(not(target_os = "linux"))]
+    {
+        win.set_size(new).map_err(|e| e.to_string())?;
+        // A no-op on Wayland, where the compositor keeps the top-left corner where it was.
+        if let Some(p) = to {
+            let _ = win.set_position(p);
+        }
     }
     if let Some(state) = app.try_state::<Arc<AppState>>() {
         state.db.set_setting(COMPACT_KEY, if compact { "true" } else { "false" });

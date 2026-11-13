@@ -618,10 +618,6 @@ fn watch_window_state(app: AppHandle) {
     use gtk4::prelude::*;
     use tauri::{Emitter, Manager};
 
-    fn xid(gtk_window: &gtk4::Window) -> Option<std::os::raw::c_ulong> {
-        let surface = gtk_window.surface()?.downcast::<gdk4_x11::X11Surface>().ok()?;
-        Some(surface.xid())
-    }
     // Off the main thread: the runtime's window getters (the handle, the size) post to this loop
     // and block on the answer, so calling them from a GTK handler deadlocks.
     fn for_window(app: &AppHandle, xid: std::os::raw::c_ulong, f: fn(tauri::WebviewWindow)) {
@@ -645,7 +641,7 @@ fn watch_window_state(app: AppHandle) {
         unsafe { gtk_window.set_data(HOOKED, ()) };
         let a = app.clone();
         gtk_window.connect_maximized_notify(move |gtk_window| {
-            let Some(xid) = xid(gtk_window) else { return };
+            let Some(xid) = gtk_xid(gtk_window) else { return };
             for_window(&a, xid, |window| {
                 let size = window.inner_size().unwrap_or_default();
                 let target = tauri::EventTarget::Window { label: window.label().into() };
@@ -654,7 +650,7 @@ fn watch_window_state(app: AppHandle) {
         });
         let a = app.clone();
         gtk_window.connect_fullscreened_notify(move |gtk_window| {
-            let Some(xid) = xid(gtk_window) else { return };
+            let Some(xid) = gtk_xid(gtk_window) else { return };
             for_window(&a, xid, |window| {
                 let Some(xid) = x11_window(&window) else { return };
                 if let Some(radius) = last_radius(xid) {
@@ -662,6 +658,92 @@ fn watch_window_state(app: AppHandle) {
                 }
             });
         });
+    }
+}
+
+/// The X11 window a GTK toplevel draws to.
+#[cfg(target_os = "linux")]
+fn gtk_xid(gtk_window: &gtk4::Window) -> Option<std::os::raw::c_ulong> {
+    use gtk4::prelude::*;
+    let surface = gtk_window.surface()?.downcast::<gdk4_x11::X11Surface>().ok()?;
+    Some(surface.xid())
+}
+
+/// Resize a window that is not user-resizable, then move it, for the mini player's compact switch
+/// (mini.rs `set_compact`): to `width` x `height` logical pixels, and then to `position`.
+///
+/// GTK 4 pins such a window's size hints, minimum and maximum, to its default size, and
+/// winit-gtk4's `set_size` on X11 resizes the X window behind GTK's back, so the hints stayed and
+/// the window manager refused it: the button did nothing. GTK's default size moves both, at GTK's
+/// next layout, with a request of its own that carries the position GTK had cached. A move sent
+/// before that request landed was undone by it, so the widget slid sideways and sometimes back.
+/// So the move waits for the surface to report the new size, and goes out after GTK's request.
+#[cfg(target_os = "linux")]
+pub fn set_fixed_size(
+    window: &tauri::WebviewWindow,
+    width: f64,
+    height: f64,
+    position: Option<tauri::PhysicalPosition<i32>>,
+) -> Result<(), String> {
+    use gtk4::prelude::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    // Before the main thread: the handle is one of the getters that wait on it.
+    let xid = x11_window(window).ok_or("no X11 window")?;
+    let (w, h) = (width.round() as i32, height.round() as i32);
+    window
+        .run_on_main_thread(move || {
+            let Some(gtk_window) = gtk4::Window::list_toplevels()
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk4::Window>().ok())
+                .find(|gtk_window| gtk_xid(gtk_window) == Some(xid))
+            else {
+                return;
+            };
+            gtk_window.set_default_size(w, h);
+            let (Some(p), Some(surface)) = (position, gtk_window.surface()) else { return };
+            // Once: on the layout at the new size, or after a moment if none comes (already that
+            // size, or a window manager that never answered).
+            let handler = Rc::new(RefCell::new(None::<gtk4::glib::SignalHandlerId>));
+            let moved = Rc::new(std::cell::Cell::new(false));
+            let finish = {
+                let (surface, handler, moved) = (surface.clone(), handler.clone(), moved.clone());
+                move || {
+                    if moved.replace(true) {
+                        return;
+                    }
+                    if let Some(id) = handler.borrow_mut().take() {
+                        surface.disconnect(id);
+                    }
+                    move_window(xid, p);
+                }
+            };
+            let on_layout = finish.clone();
+            *handler.borrow_mut() = Some(surface.connect_layout(move |_, lw, lh| {
+                if (lw, lh) == (w, h) {
+                    on_layout();
+                }
+            }));
+            gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(500), finish);
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Move an X window, its top-left corner to `p` on the root window.
+#[cfg(target_os = "linux")]
+fn move_window(xid: std::os::raw::c_ulong, p: tauri::PhysicalPosition<i32>) {
+    use x11_dl::xlib;
+
+    let Ok(x) = xlib::Xlib::open() else { return };
+    // SAFETY: a private display connection, opened and closed here.
+    unsafe {
+        let display = (x.XOpenDisplay)(std::ptr::null());
+        if display.is_null() {
+            return;
+        }
+        (x.XMoveWindow)(display, xid, p.x, p.y);
+        (x.XFlush)(display);
+        (x.XCloseDisplay)(display);
     }
 }
 
