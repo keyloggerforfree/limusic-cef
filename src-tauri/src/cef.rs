@@ -41,6 +41,7 @@ pub fn builder() -> tauri::Builder {
                 let app = tauri::Manager::app_handle(&window).clone();
                 let _ = window.run_on_main_thread(move || watch_window_state(app));
             })
+            .on_webview_ready(|webview| allow_loopback(&webview))
             .build();
         tauri::Builder::default().runtime(cef_runtime(multi)).plugin(plugin)
     }
@@ -55,6 +56,35 @@ pub fn read_button_layout() {
     if let Some(layout) = gtk4::Settings::default().and_then(|s| s.gtk_decoration_layout()) {
         let _ = crate::commands::BUTTON_LAYOUT.set(layout.into());
     }
+}
+
+/// Let the app's own page reach loopback without asking: the music video plays from the local
+/// proxy (videoproxy.rs, `http://127.0.0.1:<port>`), and Chromium's Local Network Access holds a
+/// request from `http://tauri.localhost` to loopback at an "Access other apps and services on this
+/// device" prompt. For that origin only, so a remote page in a sign-in window still asks.
+#[cfg(target_os = "linux")]
+fn allow_loopback<R: tauri::Runtime>(webview: &tauri::Webview<R>)
+where
+    R::WebviewDispatcher: tauri_runtime_cef::AsCefWebviewDispatcher,
+{
+    use tauri_runtime_cef::cef::{
+        CefString, ContentSettingTypes, ContentSettingValues, ImplBrowser, ImplBrowserHost,
+        ImplRequestContext,
+    };
+    use tauri_runtime_cef::WebviewCefExt;
+
+    let _ = webview.with_cef_webview(|webview| {
+        let Some(context) = webview.browser().host().and_then(|h| h.request_context()) else {
+            return;
+        };
+        let origin = CefString::from("http://tauri.localhost/");
+        context.set_content_setting(
+            Some(&origin),
+            Some(&origin),
+            ContentSettingTypes::LOOPBACK_NETWORK,
+            ContentSettingValues::ALLOW,
+        );
+    });
 }
 
 /// The CEF runtime as the Linux build configures it.
