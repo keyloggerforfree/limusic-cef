@@ -313,13 +313,23 @@
 	$effect(() => {
 		const el = titleEl;
 		if (!el) return;
+		// limusic-cef: a frame later, not in the callback. Switching lines resizes the very title
+		// this observes, and doing it inside the callback had Chromium report a ResizeObserver
+		// loop on roughly every third track change.
+		let frame = 0;
 		const ro = new ResizeObserver(() => {
-			twoLines = twoLines
-				? el.scrollHeight > parseFloat(getComputedStyle(el).lineHeight) * 1.5
-				: el.scrollWidth > el.clientWidth + 1;
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(() => {
+				twoLines = twoLines
+					? el.scrollHeight > parseFloat(getComputedStyle(el).lineHeight) * 1.5
+					: el.scrollWidth > el.clientWidth + 1;
+			});
 		});
 		ro.observe(el);
-		return () => ro.disconnect();
+		return () => {
+			cancelAnimationFrame(frame);
+			ro.disconnect();
+		};
 	});
 	const titleRoom = $derived(
 		`${columns ? 6.5 : 8}rem - ${twoLines ? (columns ? 2.6 : 3.5) : 0}rem`
